@@ -9,8 +9,6 @@
 /.cache
 /cache
 shmeiwseis.txt
-main.cpp
 *.o
 main
-*.sh
 *tar.gz
