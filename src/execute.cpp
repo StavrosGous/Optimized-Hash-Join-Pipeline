@@ -1,7 +1,7 @@
 #include <hardware.h>
 #include <plan.h>
 #include <table.h>
-
+#include "RHMap.h"
 namespace Contest {
 
 using ExecuteResult = std::vector<std::vector<Data>>;
@@ -19,7 +19,8 @@ struct JoinAlgorithm {
     template <class T>
     auto run() {
         namespace views = ranges::views;
-        std::unordered_map<T, std::vector<size_t>> hash_table;
+        //std::unordered_map<T, std::vector<size_t>> hash_table;
+        RHMap<T, std::vector<size_t>> hash_table;
         if (build_left) {
             for (auto&& [idx, record]: left | views::enumerate) {
                 std::visit(

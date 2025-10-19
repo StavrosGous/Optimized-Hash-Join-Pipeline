@@ -34,8 +34,9 @@ class RHMap{
     private:
         Bucket<T, T_r> b[CAPACITY]; // Might initialize it with new later in constructor
         size_t size;
+
         void insert(T &key, T_r &val, size_t psl) {
-            size_t idx = std::hash<T>()(key ) % CAPACITY;
+            size_t idx = std::hash<T>()(key) % CAPACITY;
             size_t original_idx = idx;
             idx = (idx + psl) % CAPACITY;
             while (b[idx].is_occupied) {
@@ -50,7 +51,6 @@ class RHMap{
                 psl++;
                 idx = (idx + 1) % CAPACITY;
                 if (idx == original_idx) {
-                    std::cout<< "Insert failed" << std::endl;
                     return;
                 }
             }
@@ -64,8 +64,29 @@ class RHMap{
             size = 0;
             memset(b, 0, sizeof(b));
         }
-        void insert(T key, T_r val) {
+
+        void emplace(T key, T_r val) {
             insert(key, val, 0);
+        }
+
+        std::pair<T, T_r>* end() {
+            return (std::pair<T, T_r>*) NULL;
+        }
+
+        std::pair<T, T_r>* find(T key) {
+            size_t idx = std::hash<T>()(key) % CAPACITY;
+            size_t original_idx = idx;
+            while (b[idx].is_occupied) {
+                if (b[idx].key == key) {
+                    std::pair<T, T_r> *itr = new std::pair<T, T_r>(b[idx].key, b[idx].val);
+                    return itr;
+                }
+                idx = (idx + 1) % CAPACITY;
+                if (idx == original_idx) {
+                    break;
+                }
+            }
+            return end();
         }
 
         
