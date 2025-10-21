@@ -1,6 +1,9 @@
+#pragma once
+
 #include <vector>
-#include <cstring>
 #include <ostream>
+#include <utility>
+#include <functional>
 
 #define CAPACITY 16
 
@@ -11,22 +14,16 @@ template <typename T, typename T_r>
 class Bucket {
 private:
     T key;
-    std::vector<T_r> val;
+    T_r val;
     size_t psl;
     bool is_occupied;
 
 public:
-    Bucket(): is_occupied(false), psl(0), key((T)NULL){
-        val.resize(8);
-    }
+    Bucket() : key(), val(), psl(0), is_occupied(false) {}
 
-    ~Bucket() {
-        val.clear();
-    }
-
-    void update(const T &key, T_r &val, const size_t &psl) {
-        this->key = key;
-        this->val.push_back(val);
+    void update(T&& key, T_r&& val, const size_t &psl) {
+        this->key = std::move(key);
+        this->val = std::move(val);
         this->psl = psl;
     }
     
@@ -37,90 +34,73 @@ public:
 template <typename T, typename T_r>
 class RHMap {
 private:
-
     std::vector<Bucket<T, T_r>> b;
-    size_t size;
+    size_t count;
     size_t capacity;
     size_t mask;
 
-    void insert(T &key, T_r val, size_t psl) {
-        size_t idx = std::hash<T>()(key) & mask;
-        size_t original_idx = idx;
-        idx = (idx + psl) & mask;
-        while (b.at(idx).is_occupied) {
-            if (b.at(idx).key == key) {
-                b.at(idx).val.push_back(val);
-                return;
-            }
-            if (b.at(idx).psl < psl && (std::hash<T>()(b.at(idx).key) & mask) >= original_idx) {
-                std::vector<T_r> temp_vector;
-                b.at(idx).psl++;
-                std::swap(key, b.at(idx).key);
-                temp_vector = std::move(b.at(idx).val);
-                b.at(idx).val.push_back(val);
-                std::swap(psl, b.at(idx).psl);
-                // Maybe change this instead of recursion to continue linearly with the new key,val,psl
-                insert(key, val, psl);
-                return;
-            }
-            psl++;
-            idx = (idx + 1) & mask;
-            // might remove later
-            if (idx == original_idx) {
-                return;
-            }
-        }
-        b.at(idx).update(key, val, psl);
-        b.at(idx).is_occupied = true;
-        size++;
-    }
+    
 
 public:
-    RHMap() : size(0), capacity([]() {
+    RHMap() : count(0), capacity([]() {
         size_t cap = CAPACITY;
         return cap > 0 ? 1 << (sizeof(size_t) * 8 - __builtin_clzll(cap - 1)) : 1; }()),
          mask(this->capacity - 1)
     {
         b.resize(this->capacity);
     }
-    RHMap(const size_t &capacity) : size(0), 
+    RHMap(const size_t &capacity) : count(0),
         capacity(capacity > 0 ? 1 << (sizeof(size_t) * 8 - __builtin_clzll(capacity - 1)) : 1),
         mask(this->capacity - 1)
     {
         b.resize(this->capacity);
     }
 
-    ~RHMap() {
-        b.clear();
-    }
-
     void emplace(T key, T_r val) {
-        insert(key, val, 0);
-    }
-
-    std::pair<T, T_r> *end() {
-        return (std::pair<T, T_r> *)NULL;
-    }
-
-    std::pair<T, T_r> *find(T key) {
         size_t idx = std::hash<T>()(key) & mask;
-        size_t original_idx = idx;
-        while (b.at(idx).is_occupied)
-        {
-            if (b.at(idx).key == key) {
-                std::pair<T, T_r> *itr = new std::pair<T, T_r>(b.at(idx).key, b.at(idx).val);
-                return itr;
+        size_t psl = 0;
+        while (b[idx].is_occupied) {
+            if (b[idx].key == key) {
+                b[idx].val = std::move(val);
+                return;
+            }
+            if (b[idx].psl < psl) {
+                std::swap(key, b[idx].key);
+                std::swap(val, b[idx].val);
+                std::swap(psl, b[idx].psl);
             }
             idx = (idx + 1) & mask;
-            if (idx == original_idx) {
+            ++psl;
+        }
+        b[idx].update(std::move(key), std::move(val), psl);
+        b[idx].is_occupied = true;
+        ++count;
+    }
+
+    std::pair<T, T_r&> *end() { return nullptr; }
+
+    std::pair<T, T_r&> *find(const T& key) {
+        size_t idx = std::hash<T>{}(key) & mask;
+        size_t cpsl = 0;
+        while (b[idx].is_occupied) {
+            if (b[idx].key == key) {
+                return new std::pair<T, T_r&>(b[idx].key, b[idx].val);
+            }
+            if (b[idx].psl < cpsl) {
                 break;
             }
+            idx = (idx + 1) & mask;
+            ++cpsl;
         }
         return end();
     }
 
+
+    size_t get_count() const { return count; }
+    size_t get_capacity() const { return capacity; }
+
     friend std::ostream& operator<<(std::ostream& os, const RHMap& obj) {
-        os << "RHMap(size=" << obj.size << ", capacity=" << obj.capacity << ")\n";
+        os << "RHMap(size=" << obj.count << ", capacity=" << obj.capacity << ")\n";
         for (size_t i = 0; i < obj.b.size(); ++i) {
             const auto& bucket = obj.b[i];
             os << "[" << i << "] ";
