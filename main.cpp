@@ -22,5 +22,6 @@ int main(int argc, char* argv[]) {
     map.emplace(2525, 490);
     map.emplace(22352, 324);
     map.emplace(68686, 264);
+    std::cout << map << std::endl;
     return 0;
 }
