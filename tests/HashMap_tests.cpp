@@ -27,9 +27,9 @@ TEST_CASE("Insertion and Finding in Robin_Hood_HashMap", "[HashMap]") {
     map.emplace(3, std::vector<int>{6, 7});
     //Ensure find returns the right values for all inserted keys
     for (int i = 1; i <=3; ++i) {
-        auto &itr = map.find(i);
-        REQUIRE(itr != map.end());
-        REQUIRE(itr->second == std::vector<int>{2*i, 2*i+1});
+        auto loc = map.find(i);
+        REQUIRE(loc != map.end());
+        REQUIRE(*loc == std::vector<int>{2*i, 2*i+1});
     }
 }
 
@@ -41,7 +41,7 @@ TEST_CASE("Finding Non-Existent Keys in Robin_Hood_HashMap", "[HashMap]") {
     map.emplace(3, std::vector<int>{6, 7});
     //Ensure find returns end() for non-existent keys
     for (int i = 4; i <=6; ++i) {
-        auto &itr = map.find(i);
-        REQUIRE(itr == map.end());
+        auto loc = map.find(i);
+        REQUIRE(loc == map.end());
     }
 }

@@ -22,9 +22,10 @@ public:
     Bucket() : key(), val(), psl(0), is_occupied(false) {}
 
     void update(T&& key, T_r&& val, const size_t &psl) {
-        this->key = std::move(key);
-        this->val = std::move(val);
-        this->psl = psl;
+        this->key         = std::move(key);
+        this->val         = std::move(val);
+        this->psl         = psl;
+        this->is_occupied = true;
     }
     
     friend class RHMap<T, T_r>;
@@ -40,7 +41,6 @@ private:
     size_t mask;
 
     
-
 public:
     RHMap() : count(0), capacity([]() {
         size_t cap = CAPACITY;
@@ -73,18 +73,34 @@ public:
             ++psl;
         }
         b[idx].update(std::move(key), std::move(val), psl);
-        b[idx].is_occupied = true;
         ++count;
     }
 
-    std::pair<T, T_r&> *end() { return nullptr; }
+    T_r* end() { return nullptr; }
+    const T_r* end() const { return nullptr; }
 
-    std::pair<T, T_r&> *find(const T& key) {
+    T_r* find(const T& key) {
         size_t idx = std::hash<T>{}(key) & mask;
         size_t cpsl = 0;
         while (b[idx].is_occupied) {
             if (b[idx].key == key) {
-                return new std::pair<T, T_r&>(b[idx].key, b[idx].val);
+                return &b[idx].val;
+            }
+            if (b[idx].psl < cpsl) {
+                break;
+            }
+            idx = (idx + 1) & mask;
+            ++cpsl;
+        }
+        return end();
+    }
+
+    const T_r* find(const T& key) const {
+        size_t idx = std::hash<T>{}(key) & mask;
+        size_t cpsl = 0;
+        while (b[idx].is_occupied) {
+            if (b[idx].key == key) {
+                return &b[idx].val;
             }
             if (b[idx].psl < cpsl) {
                 break;
