@@ -66,6 +66,8 @@ class HopscotchMap {
         }
     };
 
+
+template<typename T, typename T_r>
 class Bucket {
 private:
     T key;
