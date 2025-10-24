@@ -87,13 +87,13 @@ public:
         b[pos].key = std::move(key);
         b[pos].val = std::move(val);
         while (diff >= H) { // if distance is at least H, need to hopscotch
-            for (int i = pos-H+1; i < pos; ++i) { // Checking the previous H-1 Hopbuckets for possible trade
+            for (int i = (pos - H + 1) & mask; i != pos; i = (i + 1) & mask) { // Checking the previous H-1 Hopbuckets for possible trade
                 int curhash = std::hash<T>()(b[i].key) & mask; // hash of current (i'th) key
                 int tempdiff = (pos - curhash) & mask; // calculate the distance between Hopbucket and candidate for trade
                 if (tempdiff < H) { // if distance is less than H, we trade
                     // updating bitmap representation
-                    b[curhash].bitmap[pos - curhash] = true;
-                    b[curhash].bitmap[i - curhash] = false;
+                    b[curhash].bitmap[(pos - curhash) & mask] = true;
+                    b[curhash].bitmap[(i - curhash) & mask] = false;
                     // performing the trade
                     std::swap(b[i].key, b[pos].key);
                     std::swap(b[i].val, b[pos].val);
@@ -102,13 +102,13 @@ public:
                     diff = (pos - og_idx) & mask;
                     break;
                 }
-                if (i==pos-1) { // full table, rehash
+                if (i == ((pos - 1) & mask)) { // full table, rehash
                     rehash();
                     return;
                 }
             }
         }
-        b[og_idx].bitmap[pos-og_idx] = true; // finally updating the bitmap of original hash
+        b[og_idx].bitmap[diff] = true; // finally updating the bitmap of original hash
         b[og_idx].sz++; // increment size of neighbourhood
         if (b[og_idx].isFull()) { // After setting a bit in bitmap, check if neighbourhood is now full
             rehash();
