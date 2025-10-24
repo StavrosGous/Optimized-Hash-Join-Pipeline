@@ -77,25 +77,8 @@ public:
     }
 
     T_r* end() { return nullptr; }
-    const T_r* end() const { return nullptr; }
 
     T_r* find(const T& key) {
-        size_t idx = std::hash<T>{}(key) & mask;
-        size_t cpsl = 0;
-        while (b[idx].is_occupied) {
-            if (b[idx].key == key) {
-                return &b[idx].val;
-            }
-            if (b[idx].psl < cpsl) {
-                break;
-            }
-            idx = (idx + 1) & mask;
-            ++cpsl;
-        }
-        return end();
-    }
-
-    const T_r* find(const T& key) const {
         size_t idx = std::hash<T>{}(key) & mask;
         size_t cpsl = 0;
         while (b[idx].is_occupied) {
