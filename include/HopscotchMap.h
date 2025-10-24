@@ -1,5 +1,5 @@
 #include <vector>
-#define H 32
+#define H 64
 template<typename T, typename T_r>
 class HopscotchMap {
     std::vector<Bucket<T, T_r>> b;
