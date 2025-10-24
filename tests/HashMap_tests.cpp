@@ -16,7 +16,7 @@ TEST_CASE("Initialization of Robin_Hood_HashMap", "[HashMap]") {
 TEST_CASE("End Function of Robin_Hood_HashMap", "[HashMap]") {
     RHMap<int, std::vector<int>> map(10ll);
     auto end_ptr = map.end();
-    REQUIRE(end_ptr == NULL);
+    REQUIRE(end_ptr == nullptr);
 }
 
 // Test case to test successful insertion and finding of keys
