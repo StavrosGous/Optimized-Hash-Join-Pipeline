@@ -186,24 +186,7 @@ public:
         }
     }
 
-    const T_r* end() const { return nullptr; }
     T_r* end() { return nullptr; }
-
-    const T_r* find(const T& key) const {
-        size_t index1 = std::hash<T>{}(key) & mask;
-        const auto& bucket1 = b1[index1];
-        if (bucket1.is_occupied && bucket1.key == key) {
-            return &bucket1.val;
-        }
-
-        size_t index2 = murmur_hash(key) & mask;
-        const auto& bucket2 = b2[index2];
-        if (bucket2.is_occupied && bucket2.key == key) {
-            return &bucket2.val;
-        }
-
-        return end();
-    }
 
     T_r* find(const T& key) {
         size_t index1 = std::hash<T>{}(key) & mask;
