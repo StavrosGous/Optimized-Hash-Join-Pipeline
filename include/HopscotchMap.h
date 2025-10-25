@@ -26,6 +26,7 @@ public:
     void update(T&& key, T_r&& val) {
         this->key = std::move(key);
         this->val = std::move(val);
+        this->is_occupied = true;
     }
     friend class HopscotchMap<T, T_r>;
 };
@@ -83,16 +84,14 @@ public:
         }
         int pos = idx; // saving position of empty Hopbucket
         int diff = (pos - og_idx) & mask; // distance of empty Hopbucket from original key hash
-        b[pos].is_occupied = true; // Claim the Hopbucket
-        b[pos].key = std::move(key);
-        b[pos].val = std::move(val);
+        b[pos].update(std::move(key), std::move(val));
         while (diff >= H) { // if distance is at least H, need to hopscotch
             for (int i = (pos - H + 1) & mask; i != pos; i = (i + 1) & mask) { // Checking the previous H-1 Hopbuckets for possible trade
                 int curhash = std::hash<T>()(b[i].key) & mask; // hash of current (i'th) key
                 int tempdiff = (pos - curhash) & mask; // calculate the distance between Hopbucket and candidate for trade
                 if (tempdiff < H) { // if distance is less than H, we trade
                     // updating bitmap representation
-                    b[curhash].bitmap[(pos - curhash) & mask] = true;
+                    b[curhash].bitmap[tempdiff] = true;
                     b[curhash].bitmap[(i - curhash) & mask] = false;
                     // performing the trade
                     std::swap(b[i].key, b[pos].key);
@@ -102,6 +101,7 @@ public:
                     diff = (pos - og_idx) & mask;
                     break;
                 }
+                /// i think it is i == pos
                 if (i == ((pos - 1) & mask)) { // full table, rehash
                     rehash();
                     return;
