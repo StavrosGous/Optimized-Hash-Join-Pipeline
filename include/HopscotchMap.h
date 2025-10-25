@@ -115,22 +115,27 @@ public:
         }
     }
 
-    std::pair<T, T_r&> *end() { return nullptr; }
+    T_r* end() { return nullptr; }
 
-    std::pair<T, T_r&> *find(const T& key) {
-        size_t idx = std::hash<T>{}(key) & mask;
-        if (!b[idx].is_occupied) {
+    T_r* find(const T& key) {
+        const size_t idx = std::hash<T>{}(key) & mask;
+        if (b[idx].is_occupied && b[idx].key == key) {
+            return &b[idx].val;
+        }
+        if (!b[idx].is_occupied && b[idx].sz == 0) {
             return end();
         }
         for (int i = 0; i < H; ++i) {
-            if (b[idx].bitmap[i]) {
-                size_t check_idx = (idx + i) & mask;
-                if (b[check_idx].key == key) {
-                    return new std::pair<T, T_r&>(b[check_idx].key, b[check_idx].val);
-                }
+            if (!b[idx].bitmap[i]) {
+                continue;
+            }
+            const size_t check_idx = (idx + static_cast<size_t>(i)) & mask;
+            if (b[check_idx].is_occupied && b[check_idx].key == key) {
+                return &b[check_idx].val;
             }
         }
         return end();
     }
+
 };
 
