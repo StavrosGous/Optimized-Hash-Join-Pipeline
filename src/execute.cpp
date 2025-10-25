@@ -2,6 +2,7 @@
 #include <plan.h>
 #include <table.h>
 #include "RHMap.h"
+#include "CuckooMap.h"
 #include "HopscotchMap.h"
 
 namespace Contest {
@@ -23,17 +24,18 @@ struct JoinAlgorithm {
         namespace views = ranges::views;
     // std::unordered_map<T, std::vector<size_t>> hash_table;
     // RHMap<T, std::vector<size_t>> hash_table(build_left ? left.size() * 2 : right.size() * 2);
-    HopscotchMap<T, std::vector<size_t>> hash_table(build_left ? left.size() * 2 : right.size() * 2);
+    // HopscotchMap<T, std::vector<size_t>> hash_table(build_left ? left.size() * 2 : right.size() * 2);
+    CuckooMap<T, std::vector<size_t>> hash_table(build_left ? left.size() * 2: right.size() * 2);
         if (build_left) {
             for (auto&& [idx, record]: left | views::enumerate) {
                 std::visit(
                     [&hash_table, idx = idx](const auto& key) {
                         using Tk = std::decay_t<decltype(key)>;
                         if constexpr (std::is_same_v<Tk, T>) {
-                            if (auto itr = hash_table.find(key); itr == hash_table.end()) {
+                            if (auto loc = hash_table.find(key); loc == hash_table.end()) {
                                 hash_table.emplace(key, std::vector<size_t>(1, idx));
                             } else {
-                                itr->second.push_back(idx);
+                                loc->push_back(idx);
                             }
                         } else if constexpr (not std::is_same_v<Tk, std::monostate>) {
                             throw std::runtime_error("wrong type of field");
@@ -46,8 +48,8 @@ struct JoinAlgorithm {
                     [&](const auto& key) {
                         using Tk = std::decay_t<decltype(key)>;
                         if constexpr (std::is_same_v<Tk, T>) {
-                            if (auto itr = hash_table.find(key); itr != hash_table.end()) {
-                                for (auto left_idx: itr->second) {
+                            if (auto loc = hash_table.find(key); loc != hash_table.end()) {
+                                for (auto left_idx: *loc) {
                                     auto&             left_record = left[left_idx];
                                     std::vector<Data> new_record;
                                     new_record.reserve(output_attrs.size());
@@ -74,10 +76,10 @@ struct JoinAlgorithm {
                     [&hash_table, idx = idx](const auto& key) {
                         using Tk = std::decay_t<decltype(key)>;
                         if constexpr (std::is_same_v<Tk, T>) {
-                            if (auto itr = hash_table.find(key); itr == hash_table.end()) {
+                            if (auto loc = hash_table.find(key); loc == hash_table.end()) {
                                 hash_table.emplace(key, std::vector<size_t>(1, idx));
                             } else {
-                                itr->second.push_back(idx);
+                                loc->push_back(idx);
                             }
                         } else if constexpr (not std::is_same_v<Tk, std::monostate>) {
                             throw std::runtime_error("wrong type of field");
@@ -90,8 +92,8 @@ struct JoinAlgorithm {
                     [&](const auto& key) {
                         using Tk = std::decay_t<decltype(key)>;
                         if constexpr (std::is_same_v<Tk, T>) {
-                            if (auto itr = hash_table.find(key); itr != hash_table.end()) {
-                                for (auto right_idx: itr->second) {
+                            if (auto loc = hash_table.find(key); loc != hash_table.end()) {
+                                for (auto right_idx: *loc) {
                                     auto&             right_record = right[right_idx];
                                     std::vector<Data> new_record;
                                     new_record.reserve(output_attrs.size());
