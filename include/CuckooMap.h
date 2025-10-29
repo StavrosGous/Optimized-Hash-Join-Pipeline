@@ -93,7 +93,7 @@ private:
         } else if constexpr (std::is_same_v<T, std::string>) {
             return static_cast<size_t>(murmur_hash_64(key.data(), static_cast<int>(key.size()), seed));
         } else {
-            auto hashed = static_cast<uint64_t>(splitmix64(key));
+            auto hashed = static_cast<uint64_t>(splitmix64(static_cast<std::uint64_t>(std::hash<T>{}(key))));
             return static_cast<size_t>(murmur_hash_64(&hashed, sizeof(hashed), seed));
         }
     }
@@ -149,13 +149,13 @@ public:
 
         // calculate remaining kicks allowed
         size_t kicks_remaining = capacity * 2 + 1;
-        bool   place_in_first  = true;
+        bool place_in_first  = true;
 
         while (true) {
             /// according to the current table working use its values
             auto& table = place_in_first ? b1 : b2;
             auto& table_count = place_in_first ? count1 : count2;
-            size_t index = (place_in_first ? splitmix64(key) : murmur_hash(key)) & mask;
+            size_t index = (place_in_first ? splitmix64(static_cast<std::uint64_t>(std::hash<T>{}(key))) : murmur_hash(key)) & mask;
             auto& bucket = table[index];
 
             if (!bucket.is_occupied) {
@@ -184,7 +184,7 @@ public:
     T_r* end() { return nullptr; }
 
     T_r* find(const T& key) {
-        size_t index1 = splitmix64(key) & mask;
+        size_t index1 = splitmix64(static_cast<std::uint64_t>(std::hash<T>{}(key))) & mask;
         auto&  bucket1 = b1[index1];
         if (bucket1.is_occupied && bucket1.key == key) {
             return &bucket1.val;
