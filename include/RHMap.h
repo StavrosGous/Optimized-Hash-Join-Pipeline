@@ -21,18 +21,18 @@ class RHMap;
 template <typename T, typename T_r>
 class Bucket {
 private:
-    T     key;
-    T_r   val;
+    T key;
+    T_r val;
     size_t psl;
-    bool   is_occupied;
+    bool is_occupied;
 
 public:
     Bucket() : key(), val(), psl(0), is_occupied(false) {}
 
     void update(T&& key, T_r&& val, size_t psl_val) {
-        this->key         = std::move(key);
-        this->val         = std::move(val);
-        this->psl         = psl_val;
+        this->key = std::move(key);
+        this->val = std::move(val);
+        this->psl = psl_val;
         this->is_occupied = true;
     }
     
@@ -65,10 +65,10 @@ public:
     }
 
     void emplace(T key, T_r val) {
-    auto*        buckets    = b.data();
-    const size_t local_mask = mask;
-    size_t       idx        = splitmix64(static_cast<std::uint64_t>(std::hash<T>{}(key))) & local_mask;
-        size_t psl        = 0;
+        auto* buckets = b.data();
+        const size_t local_mask = mask;
+        size_t idx = splitmix64(static_cast<std::uint64_t>(std::hash<T>{}(key))) & local_mask;
+        size_t psl = 0;
 
         while (true) {
             auto& bucket = buckets[idx];
@@ -90,10 +90,10 @@ public:
     T_r* end() { return nullptr; }
 
     T_r* find(const T& key) {
-        auto*        buckets    = b.data();
+        auto* buckets = b.data();
         const size_t local_mask = mask;
-        size_t       idx        = splitmix64(static_cast<std::uint64_t>(std::hash<T>{}(key))) & local_mask;
-        size_t       cpsl       = 0;
+        size_t idx = splitmix64(static_cast<std::uint64_t>(std::hash<T>{}(key))) & local_mask;
+        size_t cpsl = 0;
 
         while (true) {
             auto& bucket = buckets[idx];
