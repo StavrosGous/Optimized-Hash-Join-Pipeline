@@ -142,8 +142,8 @@ public:
     
 
     void emplace(T key, T_r val) {
-        // if combined sizes fo the 2 tables exceed load factor, rehash
-        if ((count1 + count2) >= static_cast<size_t>(capacity * LOAD_FACTOR)) {
+        // if combined sizes for the 2 tables exceed load factor, rehash
+        if ((count1 + count2) >= capacity * LOAD_FACTOR) {
             rehash();
         }
 
@@ -185,7 +185,7 @@ public:
 
     T_r* find(const T& key) {
         size_t index1 = splitmix64(static_cast<std::uint64_t>(std::hash<T>{}(key))) & mask;
-        auto&  bucket1 = b1[index1];
+        auto& bucket1 = b1[index1];
         if (bucket1.is_occupied && bucket1.key == key) {
             return &bucket1.val;
         }
