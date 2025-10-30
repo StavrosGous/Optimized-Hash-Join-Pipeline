@@ -1,4 +1,6 @@
 #pragma once
+#include <cstdint>
+#include <utility>
 #include <vector>
 #define H 64
 
@@ -11,21 +13,22 @@ class HopBucket {
 private:
     T key;
     T_r val;
-    bool bitmap[H];
+    uint64_t bitmap;
+    size_t home_idx;
     int sz;
     bool is_occupied;
-    bool isFull() {
+    bool isFull() const {
         return sz == H;
     }
 
 public:
-    HopBucket() : key(), val(), sz(0), is_occupied(false) {
-        memset(bitmap, 0, sizeof(bitmap));
-    }
+    HopBucket() : key(), val(), bitmap(0), home_idx(0), sz(0), is_occupied(false) {}
 
-    void update(T&& key, T_r&& val) {
+    void update(T&& key, T_r&& val, size_t home_idx) {
         this->key = std::move(key);
         this->val = std::move(val);
+        this->home_idx = home_idx;
+        this->is_occupied = true;
     }
     friend class HopscotchMap<T, T_r>;
 };
@@ -68,11 +71,13 @@ public:
     }
 
     void emplace(T key, T_r val) {
-        size_t idx = std::hash<T>()(key) & mask; // hash of key to be inserted
+        const std::hash<T> hasher;
+        size_t idx = hasher(key) & mask; // hash of key to be inserted
         size_t og_idx = idx; // save original key hash for future reference
-        while (b[idx].is_occupied) { // linear search to find empty Hopbucket
-            if (b[idx].key == key) {
-                b[idx].val = std::move(val);
+        HopBucket<T, T_r>* bucket = &b[idx];
+        while (bucket->is_occupied) { // linear search to find empty Hopbucket
+            if (bucket->key == key) {
+                bucket->val = std::move(val);
                 return;
             }
             idx = (idx + 1) & mask;
@@ -80,57 +85,87 @@ public:
                 rehash();
                 return;
             }
+            bucket = &b[idx];
         }
-        int pos = idx; // saving position of empty Hopbucket
-        int diff = (pos - og_idx) & mask; // distance of empty Hopbucket from original key hash
-        b[pos].is_occupied = true; // Claim the Hopbucket
-        b[pos].key = std::move(key);
-        b[pos].val = std::move(val);
+        size_t pos = idx; // saving position of empty Hopbucket
+        bucket->update(std::move(key), std::move(val), og_idx);
+        size_t diff = (pos - og_idx) & mask; // distance of empty Hopbucket from original key hash
         while (diff >= H) { // if distance is at least H, need to hopscotch
-            for (int i = (pos - H + 1) & mask; i != pos; i = (i + 1) & mask) { // Checking the previous H-1 Hopbuckets for possible trade
-                int curhash = std::hash<T>()(b[i].key) & mask; // hash of current (i'th) key
-                int tempdiff = (pos - curhash) & mask; // calculate the distance between Hopbucket and candidate for trade
+            bool moved = false;
+            for (size_t k = 1; k < H; ++k) { // Checking the previous H-1 Hopbuckets for possible trade
+                const size_t i = (pos + capacity - k) & mask;
+                HopBucket<T, T_r>& candidate = b[i];
+                if (!candidate.is_occupied) {
+                    continue;
+                }
+                const size_t curhash = candidate.home_idx; // cached home slot avoids rehashing
+                const size_t tempdiff = (pos - curhash) & mask; // calculate the distance between Hopbucket and candidate for trade
                 if (tempdiff < H) { // if distance is less than H, we trade
                     // updating bitmap representation
-                    b[curhash].bitmap[(pos - curhash) & mask] = true;
-                    b[curhash].bitmap[(i - curhash) & mask] = false;
+                    HopBucket<T, T_r>& home = b[curhash];
+                    const size_t old_offset = (i - curhash) & mask;
+                    const uint64_t new_bit = 1ULL << tempdiff;
+                    const uint64_t old_bit = 1ULL << old_offset;
+                    const bool new_set = (home.bitmap & new_bit) != 0;
+                    const bool old_set = (home.bitmap & old_bit) != 0;
+                    if (!new_set) {
+                        home.bitmap |= new_bit;
+                        home.sz++;
+                    }
+                    if (old_set) {
+                        home.bitmap &= ~old_bit;
+                        home.sz--;
+                    }
                     // performing the trade
-                    std::swap(b[i].key, b[pos].key);
-                    std::swap(b[i].val, b[pos].val);
+                    std::swap(candidate.key, bucket->key);
+                    std::swap(candidate.val, bucket->val);
+                    std::swap(candidate.home_idx, bucket->home_idx);
                     // updating pos and diff because of possible next iteration
                     pos = i;
+                    bucket = &b[pos];
                     diff = (pos - og_idx) & mask;
+                    moved = true;
                     break;
                 }
-                if (i == ((pos - 1) & mask)) { // full table, rehash
-                    rehash();
-                    return;
-                }
+            }
+            if (!moved) { // full table, rehash
+                rehash();
+                return;
             }
         }
-        b[og_idx].bitmap[diff] = true; // finally updating the bitmap of original hash
-        b[og_idx].sz++; // increment size of neighbourhood
-        if (b[og_idx].isFull()) { // After setting a bit in bitmap, check if neighbourhood is now full
+        HopBucket<T, T_r>& origin = b[og_idx];
+        const uint64_t origin_bit = 1ULL << diff;
+        if ((origin.bitmap & origin_bit) == 0) { // finally updating the bitmap of original hash
+            origin.bitmap |= origin_bit;
+            origin.sz++; // increment size of neighbourhood
+        }
+        if (origin.isFull()) { // After setting a bit in bitmap, check if neighbourhood is now full
             rehash();
         }
     }
 
-    std::pair<T, T_r&> *end() { return nullptr; }
+    T_r* end() { return nullptr; }
 
-    std::pair<T, T_r&> *find(const T& key) {
-        size_t idx = std::hash<T>{}(key) & mask;
-        if (!b[idx].is_occupied) {
+    T_r* find(const T& key) {
+        const size_t idx = std::hash<T>{}(key) & mask;
+        HopBucket<T, T_r>& bucket = b[idx];
+        if (bucket.is_occupied && bucket.key == key) {
+            return &bucket.val;
+        }
+        if (!bucket.is_occupied && bucket.sz == 0) {
             return end();
         }
-        for (int i = 0; i < H; ++i) {
-            if (b[idx].bitmap[i]) {
-                size_t check_idx = (idx + i) & mask;
-                if (b[check_idx].key == key) {
-                    return new std::pair<T, T_r&>(b[check_idx].key, b[check_idx].val);
-                }
+        uint64_t bits = bucket.bitmap; // iterate only set bits via ctz trick
+        while (bits) {
+            const unsigned int offset = static_cast<unsigned int>(__builtin_ctzll(bits)); // index of lowest set bit
+            bits &= bits - 1; // clear lowest set bit
+            const size_t check_idx = (idx + static_cast<size_t>(offset)) & mask;
+            HopBucket<T, T_r>& candidate = b[check_idx];
+            if (candidate.is_occupied && candidate.key == key) {
+                return &candidate.val;
             }
         }
         return end();
     }
-};
 
+};
