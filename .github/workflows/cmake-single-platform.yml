@@ -33,9 +33,9 @@ jobs:
       
     - name: Build tests
       working-directory: ${{github.workspace}}
-      run: ./build.sh
+      run: ./build.sh tests
 
     - name: Test
       working-directory: ${{github.workspace}}/build
-      run: ./run.sh
+      run: ./run.sh tests
 
