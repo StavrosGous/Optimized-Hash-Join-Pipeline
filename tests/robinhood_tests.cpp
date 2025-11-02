@@ -1,5 +1,4 @@
 #include <catch2/catch_test_macros.hpp>
-
 #include "RHMap.h"
 
 // Test case to verify initialization of Robin_Hood_HashMap

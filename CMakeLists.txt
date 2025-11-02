@@ -87,8 +87,15 @@ if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "ppc|powerpc|ppc64|ppc64le")
 endif()
 
 # Targets
+file(GLOB UNIT_TEST_SRC
+    CONFIGURE_DEPENDS
+    "tests/*.cpp"
+)
+list(FILTER UNIT_TEST_SRC EXCLUDE REGEX "/read_sql\\.cpp$")
+list(FILTER UNIT_TEST_SRC EXCLUDE REGEX "/build_database\\.cpp$")
+
 add_executable(run ${SIGMODPC_SRC} tests/read_sql.cpp)
-add_executable(unit_tests ${SIGMODPC_SRC} tests/unit_tests.cpp)
+add_executable(unit_tests ${SIGMODPC_SRC} ${UNIT_TEST_SRC})
 add_executable(build_database tests/build_database.cpp)
 add_executable(cuckoo_tests tests/cuckoo_tests.cpp)
 add_executable(hopscotch_tests tests/hopscotch_tests.cpp)
