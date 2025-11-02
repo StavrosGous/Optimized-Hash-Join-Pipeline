@@ -1,11 +1,19 @@
 #pragma once
 
-#include <vector>
+#include <cstdint>
+#include <functional>
 #include <ostream>
 #include <utility>
-#include <functional>
+#include <vector>
 
 #define CAPACITY 16
+
+inline std::uint64_t splitmix64(std::uint64_t x) {
+    x += 0x9e3779b97f4a7c15ULL;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    return x ^ (x >> 31);
+}
 
 template <typename T, typename T_r>
 class RHMap;
@@ -21,10 +29,11 @@ private:
 public:
     Bucket() : key(), val(), psl(0), is_occupied(false) {}
 
-    void update(T&& key, T_r&& val, const size_t &psl) {
+    void update(T&& key, T_r&& val, size_t psl_val) {
         this->key = std::move(key);
         this->val = std::move(val);
-        this->psl = psl;
+        this->psl = psl_val;
+        this->is_occupied = true;
     }
     
     friend class RHMap<T, T_r>;
@@ -40,7 +49,6 @@ private:
     size_t mask;
 
     
-
 public:
     RHMap() : count(0), capacity([]() {
         size_t cap = CAPACITY;
@@ -57,39 +65,48 @@ public:
     }
 
     void emplace(T key, T_r val) {
-        size_t idx = std::hash<T>()(key) & mask;
+        auto* buckets = b.data();
+        const size_t local_mask = mask;
+        size_t idx = splitmix64(static_cast<std::uint64_t>(std::hash<T>{}(key))) & local_mask;
         size_t psl = 0;
-        while (b[idx].is_occupied) {
-            if (b[idx].key == key) {
-                b[idx].val = std::move(val);
+
+        while (true) {
+            auto& bucket = buckets[idx];
+            if (!bucket.is_occupied) {
+                bucket.update(std::move(key), std::move(val), psl);
+                ++count;
                 return;
             }
-            if (b[idx].psl < psl) {
-                std::swap(key, b[idx].key);
-                std::swap(val, b[idx].val);
-                std::swap(psl, b[idx].psl);
+            if (bucket.psl < psl) {
+                std::swap(key, bucket.key);
+                std::swap(val, bucket.val);
+                std::swap(psl, bucket.psl);
             }
-            idx = (idx + 1) & mask;
+            idx = (idx + 1) & local_mask;
             ++psl;
         }
-        b[idx].update(std::move(key), std::move(val), psl);
-        b[idx].is_occupied = true;
-        ++count;
     }
 
-    std::pair<T, T_r&> *end() { return nullptr; }
+    T_r* end() { return nullptr; }
 
-    std::pair<T, T_r&> *find(const T& key) {
-        size_t idx = std::hash<T>{}(key) & mask;
+    T_r* find(const T& key) {
+        auto* buckets = b.data();
+        const size_t local_mask = mask;
+        size_t idx = splitmix64(static_cast<std::uint64_t>(std::hash<T>{}(key))) & local_mask;
         size_t cpsl = 0;
-        while (b[idx].is_occupied) {
-            if (b[idx].key == key) {
-                return new std::pair<T, T_r&>(b[idx].key, b[idx].val);
+
+        while (true) {
+            auto& bucket = buckets[idx];
+            if (!bucket.is_occupied) {
+                return end();
             }
-            if (b[idx].psl < cpsl) {
+            if (bucket.key == key) {
+                return &bucket.val;
+            }
+            if (bucket.psl < cpsl) {
                 break;
             }
-            idx = (idx + 1) & mask;
+            idx = (idx + 1) & local_mask;
             ++cpsl;
         }
         return end();

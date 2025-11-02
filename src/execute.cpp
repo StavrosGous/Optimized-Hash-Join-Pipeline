@@ -2,10 +2,7 @@
 #include <plan.h>
 #include <table.h>
 #include "RHMap.h"
-<<<<<<< HEAD
-=======
 //#include "CuckooMap.h"
->>>>>>> de90fc39f0224dc2582fc9c13959f9d5f324e934
 #include "HopscotchMap.h"
 namespace Contest {
 
