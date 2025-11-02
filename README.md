@@ -184,7 +184,7 @@ Code is compiled with Clang 18.
 
 
 
-[Actions Dashboard](https://github.com/uoa-k23a/k23a-2025-d1-2-odds-1-pipeline/actions/workflows/cmake-single-platform.yml)
+[Actions Dashboard](https://github.com/uoa-k23a/k23a-2025-d1-2-odds-1-pipeline/actions/workflows/cmake-single-platform.yml/badge.svg)
 
 [Tests](https://github.com/OWNER/uoa-k23a/k23a-2025-d1-2-odds-1-pipeline/workflows/cmake-single-platform.yml?query=branch%3Amain)
 
