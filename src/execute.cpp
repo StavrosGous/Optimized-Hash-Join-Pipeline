@@ -4,7 +4,6 @@
 #include "RHMap.h"
 #include "CuckooMap.h"
 #include "HopscotchMap.h"
-
 namespace Contest {
 
 using ExecuteResult = std::vector<std::vector<Data>>;
@@ -22,10 +21,10 @@ struct JoinAlgorithm {
     template <class T>
     auto run() {
         namespace views = ranges::views;
-    // std::unordered_map<T, std::vector<size_t>> hash_table;
-    // RHMap<T, std::vector<size_t>> hash_table(build_left ? left.size() * 2 : right.size() * 2);
-    // HopscotchMap<T, std::vector<size_t>> hash_table(build_left ? left.size() * 2 : right.size() * 2);
-    CuckooMap<T, std::vector<size_t>> hash_table(build_left ? left.size() * 2: right.size() * 2);
+        // std::unordered_map<T, std::vector<size_t>> hash_table;
+        // RHMap<T, std::vector<size_t>> hash_table(build_left ? left.size() << 1 : right.size() << 1);
+        // CuckooMap<T, std::vector<size_t>> hash_table(build_left ? left.size() << 1: right.size() << 1);
+        HopscotchMap<T, std::vector<size_t>> hash_table(build_left ? left.size() << 1 : right.size() << 1);
         if (build_left) {
             for (auto&& [idx, record]: left | views::enumerate) {
                 std::visit(
