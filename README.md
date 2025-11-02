@@ -1,4 +1,6 @@
 [![Review Assignment Due Date](https://classroom.github.com/assets/deadline-readme-button-22041afd0340ce965d47ae6ef1cefeee28c7c493a6346c4f15d667ab976d596c.svg)](https://classroom.github.com/a/gjaw_qSU)
+
+![Actions Dashboard](https://github.com/uoa-k23a/k23a-2025-d1-2-odds-1-pipeline/actions/workflows/cmake-single-platform.yml/badge.svg)
 # SIGMOD Contest 2025
 
 ## Task
@@ -184,9 +186,8 @@ Code is compiled with Clang 18.
 
 
 
-![Actions Dashboard](https://github.com/uoa-k23a/k23a-2025-d1-2-odds-1-pipeline/actions/workflows/cmake-single-platform.yml/badge.svg)
 
-![Tests](https://github.com/OWNER/uoa-k23a/k23a-2025-d1-2-odds-1-pipeline/workflows/cmake-single-platform.yml?query=branch%3Amain)
+
 
 ## std::unordered_map run plans.json
 ```bash
