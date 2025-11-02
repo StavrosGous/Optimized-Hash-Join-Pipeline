@@ -11,7 +11,6 @@ TEST_CASE("Initialization of Robin_Hood_HashMap", "[HashMap]") {
     REQUIRE(map->get_capacity() == 1 << (sizeof(size_t) * 8 - __builtin_clzll(10 - 1)));
     delete map;
 }
-
 //Test case to check if end() returns casted NULL pointer
 TEST_CASE("End Function of Robin_Hood_HashMap", "[HashMap]") {
     RHMap<int, std::vector<int>> map(10ll);
