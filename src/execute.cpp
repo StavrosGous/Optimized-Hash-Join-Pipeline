@@ -20,7 +20,7 @@ struct JoinAlgorithm {
     template <class T>
     auto run() {
         namespace views = ranges::views;
-        RHMap<T, std::vector<size_t>> hash_table(build_left ? left.size() << 1 : right.size() << 1);
+        std::unordered_map<T, std::vector<size_t>> hash_table;
         if (build_left) {
             for (auto&& [idx, record]: left | views::enumerate) {
                 std::visit(
