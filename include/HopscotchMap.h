@@ -2,6 +2,8 @@
 #include <cstdint>
 #include <utility>
 #include <vector>
+#include <chrono>
+#include "utils.h"
 #define H 64
 
 template<typename T, typename T_r>
@@ -41,18 +43,18 @@ private:
     size_t capacity;
     size_t mask;
     
-        void rehash() {
-            std::vector<HopBucket<T, T_r>> old_Hopbuckets = b;
-            b.clear();
-            capacity *= 2;
-            b.resize(capacity);
-            mask = capacity - 1;
-            for (auto &old_Hopbucket : old_Hopbuckets) {
-                if (old_Hopbucket.is_occupied) {
-                    emplace(std::move(old_Hopbucket.key), std::move(old_Hopbucket.val));
-                }
+    void rehash() {
+        std::vector<HopBucket<T, T_r>> old_Hopbuckets = b;
+        b.clear();
+        capacity *= 2;
+        b.resize(capacity);
+        mask = capacity - 1;
+        for (auto &old_Hopbucket : old_Hopbuckets) {
+            if (old_Hopbucket.is_occupied) {
+                emplace(std::move(old_Hopbucket.key), std::move(old_Hopbucket.val));
             }
         }
+    }
 
 public:
 
@@ -71,8 +73,7 @@ public:
     }
 
     void emplace(T key, T_r val) {
-        const std::hash<T> hasher;
-        size_t idx = hasher(key) & mask; // hash of key to be inserted
+        size_t idx = std::hash<T>{}(key) & mask; // hash of key to be inserted
         size_t og_idx = idx; // save original key hash for future reference
         HopBucket<T, T_r>* bucket = &b[idx];
         while (bucket->is_occupied) { // linear search to find empty Hopbucket

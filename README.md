@@ -184,6 +184,8 @@ Code is compiled with Clang 18.
 
 
 
+[Build](https://github.com/uoa-k23a/k23a-2025-d1-2-odds-1-pipeline/actions/workflows/cmake-single-platform.yml)
+
 ## std::unordered_map run plans.json
 ```bash
 Query 1a >>              Runtime: 375 ms - Result correct: true
