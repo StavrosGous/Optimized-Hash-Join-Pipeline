@@ -25,8 +25,7 @@ jobs:
     
     - name: Configure CMake
       working-directory: ${{github.workspace}}
-      run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev && echo "pwd=$(pwd)";echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE";ls -la "$GITHUB_WORKSPACE"
-
+      run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev
     
     - name: Build project
       working-directory: ${{github.workspace}}
@@ -34,9 +33,9 @@ jobs:
       
     - name: Build tests
       working-directory: ${{github.workspace}}
-      run: ./build.sh tests
+      run: chmod +x ./build.sh && ./build.sh tests
 
     - name: Test
       working-directory: ${{github.workspace}}/build
-      run: ./run.sh tests
+      run: chmod +x ./run.sh && ./run.sh tests
 
