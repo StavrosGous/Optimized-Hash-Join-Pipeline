@@ -107,8 +107,6 @@ public:
     }
 
 
-    size_t get_count() const { return count; }
-    size_t get_capacity() const { return capacity; }
 
     friend std::ostream& operator<<(std::ostream& os, const RHMap& obj) {
         os << "RHMap(size=" << obj.count << ", capacity=" << obj.capacity << ")\n";
