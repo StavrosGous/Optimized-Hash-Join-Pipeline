@@ -7,8 +7,6 @@
 #include <vector>
 #include "utils.h"
 
-#define CAPACITY 16
-
 template <typename T, typename T_r>
 class RHMap;
 
@@ -61,7 +59,8 @@ public:
     void emplace(T key, T_r val) {
         auto* buckets = b.data();
         const size_t local_mask = mask;
-        size_t idx = splitmix64(static_cast<std::uint64_t>(std::hash<T>{}(key))) & local_mask;
+        size_t hasher = splitmix64(static_cast<std::uint64_t>(std::hash<T>{}(key))) & local_mask;
+        size_t idx = hasher;
         size_t psl = 0;
 
         while (true) {
@@ -71,7 +70,7 @@ public:
                 ++count;
                 return;
             }
-            if (bucket.psl < psl) {
+            if ((bucket.psl < psl) && (hasher <= splitmix64(static_cast<std::uint64_t>(std::hash<T>{}(bucket.key))) & local_mask)) {
                 std::swap(key, bucket.key);
                 std::swap(val, bucket.val);
                 std::swap(psl, bucket.psl);

@@ -82,9 +82,17 @@ file(GLOB SIGMODPC_SRC
 # Use -O2 and -g everywhere and enable march=native for all but Power servers, which results in the following error:
 #    clang++-18: error: unsupported option '-march=' for target 'powerpc64le-unknown-linux-gnu'
 # This flag works on other Power systems, but for now, we disable march=native on all Power machines.
-add_compile_options(-O2 -g)
+
 if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "ppc|powerpc|ppc64|ppc64le")
     add_compile_options(-march=native)
+endif()
+
+# Add optimization and debug info
+add_compile_options(-O2 -g)
+
+# Define HASH_MAP compile definition if specified
+if(DEFINED HASH_MAP)
+    add_compile_definitions(HASH_MAP=${HASH_MAP})
 endif()
 
 # Targets

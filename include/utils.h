@@ -1,7 +1,13 @@
 #pragma once
-
 #include <cstdint>
 #include <cstring>
+
+#ifndef CAPACITY
+#define CAPACITY 32
+#endif
+#ifndef LOAD_FACTOR
+#define LOAD_FACTOR 0.55
+#endif
 
 inline std::uint64_t splitmix64(std::uint64_t x) {
 	x += 0x9e3779b97f4a7c15ULL;

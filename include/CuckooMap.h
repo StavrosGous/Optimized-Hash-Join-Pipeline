@@ -9,9 +9,6 @@
 #include <cstring>
 #include "utils.h"
 
-#define CAPACITY 16
-#define LOAD_FACTOR 0.5
-
 template <typename T, typename T_r>
 class CuckooMap;
 
@@ -47,14 +44,7 @@ private:
 
     size_t murmur_hash(const T& key) const {
         const uint64_t seed = 0x9e3779b97f4a7c15ULL;
-        if constexpr (std::is_arithmetic_v<T>) {
-            return static_cast<size_t>(murmur_hash_64(&key, sizeof(T), seed));
-        } else if constexpr (std::is_same_v<T, std::string>) {
-            return static_cast<size_t>(murmur_hash_64(key.data(), static_cast<int>(key.size()), seed));
-        } else {
-            auto hashed = static_cast<uint64_t>(splitmix64(static_cast<std::uint64_t>(std::hash<T>{}(key))));
-            return static_cast<size_t>(murmur_hash_64(&hashed, sizeof(hashed), seed));
-        }
+        return static_cast<size_t>(murmur_hash_64(&key, sizeof(T), seed));
     }
 
     void rehash() {
@@ -62,7 +52,7 @@ private:
         std::vector<CBucket<T, T_r>> old_b2 = b2;
         b1.clear();
         b2.clear();
-        capacity *= 2;
+        capacity <<= 1;
         b1.resize(capacity);
         b2.resize(capacity);
         mask = capacity - 1;
@@ -83,7 +73,12 @@ private:
 public:
     CuckooMap() : count1(0), count2(0), capacity([]() {
         size_t cap = CAPACITY;
-        return cap > 0 ? 1 << (sizeof(size_t) * 8 - __builtin_clzll(cap - 1)) : 1; }()),
+        size_t half = cap > 1 ? (cap >> 1) : 1;
+        if (half <= 1) {
+            return static_cast<size_t>(1);
+        }
+        return static_cast<size_t>(1ULL << (sizeof(size_t) * 8 - __builtin_clzll(half - 1)));
+    }()),
         mask(this->capacity - 1)
     {
         b1.resize(this->capacity);
@@ -91,7 +86,14 @@ public:
     }
 
     CuckooMap(const size_t &capacity) : count1(0), count2(0),
-        capacity(capacity > 0 ? 1 << (sizeof(size_t) * 8 - __builtin_clzll(capacity - 1)) : 1),
+        capacity([&capacity]() {
+            size_t cap = capacity;
+            size_t half = cap > 1 ? (cap >> 1) : 1;
+            if (half <= 1) {
+                return static_cast<size_t>(1);
+            }
+            return static_cast<size_t>(1ULL << (sizeof(size_t) * 8 - __builtin_clzll(half - 1)));
+        }()),
         mask(this->capacity - 1)
     {
         b1.resize(this->capacity);
@@ -101,13 +103,13 @@ public:
     
 
     void emplace(T key, T_r val) {
-        // if combined sizes for the 2 tables exceed load factor, rehash
-        if ((count1 + count2) >= capacity * LOAD_FACTOR) {
+        // rehash if any table exceeds the load factor
+        if (count1 >= capacity * LOAD_FACTOR || count2 >= capacity * LOAD_FACTOR) {
             rehash();
         }
 
         // calculate remaining kicks allowed
-        size_t kicks_remaining = capacity * 2 + 1;
+        size_t kicks_remaining = capacity + 1;
         bool place_in_first  = true;
 
         while (true) {

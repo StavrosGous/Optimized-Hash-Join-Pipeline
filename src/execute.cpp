@@ -4,6 +4,12 @@
 #include "RHMap.h"
 #include "CuckooMap.h"
 #include "HopscotchMap.h"
+#include <iostream>
+
+#ifndef HASH_MAP
+#define HASH_MAP 0
+#endif
+
 namespace Contest {
 
 using ExecuteResult = std::vector<std::vector<Data>>;
@@ -21,10 +27,13 @@ struct JoinAlgorithm {
     template <class T>
     auto run() {
         namespace views = ranges::views;
-        // std::unordered_map<T, std::vector<size_t>> hash_table;
-        RHMap<T, std::vector<size_t>> hash_table(build_left ? left.size() << 1 : right.size() << 1);
-        // CuckooMap<T, std::vector<size_t>> hash_table(build_left ? left.size() << 1: right.size() << 1);
-        // HopscotchMap<T, std::vector<size_t>> hash_table(build_left ? (left.size() << 1) : (right.size() << 1));
+        assert(HASH_MAP >=0 && HASH_MAP <=2);
+        using hashmap_type = std::conditional_t<HASH_MAP == 0,
+            RHMap<T, std::vector<size_t>>,
+            std::conditional_t<HASH_MAP == 1,
+                HopscotchMap<T, std::vector<size_t>>,
+                CuckooMap<T, std::vector<size_t>>>>;
+        hashmap_type hash_table(build_left ? left.size() * 1.82 : right.size() * 1.82);
         if (build_left) {
             for (auto&& [idx, record]: left | views::enumerate) {
                 std::visit(
