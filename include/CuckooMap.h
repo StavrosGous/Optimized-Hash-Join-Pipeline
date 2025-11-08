@@ -70,6 +70,8 @@ private:
         }
     }
 
+
+
 public:
     CuckooMap() : count1(0), count2(0), capacity([]() {
         size_t cap = CAPACITY;
@@ -116,7 +118,7 @@ public:
             /// according to the current table working use its values
             auto& table = place_in_first ? b1 : b2;
             auto& table_count = place_in_first ? count1 : count2;
-            size_t index = (place_in_first ? splitmix64(static_cast<std::uint64_t>(std::hash<T>{}(key))) : murmur_hash(key)) & mask;
+            size_t index = (place_in_first ? crc_hash(key) : murmur_hash(&key)) & mask;
             auto& bucket = table[index];
 
             if (!bucket.is_occupied) {
@@ -145,7 +147,7 @@ public:
     T_r* end() { return nullptr; }
 
     T_r* find(const T& key) {
-        size_t index1 = splitmix64(static_cast<std::uint64_t>(std::hash<T>{}(key))) & mask;
+        size_t index1 = crc_hash(key) & mask;
         auto& bucket1 = b1[index1];
         if (bucket1.is_occupied && bucket1.key == key) {
             return &bucket1.val;

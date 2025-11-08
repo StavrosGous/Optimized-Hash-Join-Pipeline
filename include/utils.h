@@ -1,7 +1,8 @@
 #pragma once
 #include <cstdint>
 #include <cstring>
-
+#include <iostream>
+#include <zlib.h>
 #ifndef CAPACITY
 #define CAPACITY 32
 #endif
@@ -9,12 +10,34 @@
 #define LOAD_FACTOR 0.55
 #endif
 
-inline std::uint64_t splitmix64(std::uint64_t x) {
-	x += 0x9e3779b97f4a7c15ULL;
-	x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
-	x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
-	return x ^ (x >> 31);
+
+
+
+
+static inline uint64_t crc64(uint64_t key) {
+	return __builtin_ia32_crc32di(key, 0);
 }
+
+static inline uint32_t crc32(uint32_t key) {
+    return __builtin_ia32_crc32si(key, 0);
+}
+
+template<typename T>
+uint64_t crc_hash(const T& key) {
+	if constexpr (std::is_same_v<T, int32_t>) {
+		return crc32(key) * ((0x8648DBDull << 32) + 1);
+	} else if constexpr (std::is_same_v<T, int64_t>) {
+		return crc64(key) * 0x2545F4914F6CDD1D;
+	} else if constexpr (std::is_same_v<T, double>) {
+		return crc64(*(uint64_t*)&key) * 0x2545F4914F6CDD1D;
+	} else {
+		std::cout << "Unsupported key type for hashing" << std::endl;
+	}
+}
+
+
+
+
 
 inline std::uint64_t murmur_hash_64(const void* key, int len, std::uint64_t seed) {
 	constexpr std::uint64_t m = 0xc6a4a7935bd1e995ULL;

@@ -40,6 +40,21 @@ private:
     size_t capacity;
     size_t mask;
 
+    void rehash() {
+        std::vector<Bucket<T, T_r>> old_buckets = b;
+        b.clear();
+        capacity *= 2;
+        capacity = capacity > 0 ? 1 << (sizeof(size_t) * 8 - __builtin_clzll(capacity - 1)) : 1;
+        b.resize(capacity);
+        mask = capacity - 1;
+        count = 0;
+        for (auto &old_bucket : old_buckets) {
+            if (old_bucket.is_occupied) {
+                emplace(std::move(old_bucket.key), std::move(old_bucket.val));
+            }
+        }
+    }
+
     
 public:
     RHMap() : count(0), capacity([]() {
@@ -59,7 +74,7 @@ public:
     void emplace(T key, T_r val) {
         auto* buckets = b.data();
         const size_t local_mask = mask;
-        size_t hasher = splitmix64(static_cast<std::uint64_t>(std::hash<T>{}(key))) & local_mask;
+        size_t hasher = crc_hash(key) & local_mask;
         size_t idx = hasher;
         size_t psl = 0;
 
@@ -70,7 +85,7 @@ public:
                 ++count;
                 return;
             }
-            if ((bucket.psl < psl) && (hasher <= splitmix64(static_cast<std::uint64_t>(std::hash<T>{}(bucket.key))) & local_mask)) {
+            if ((bucket.psl < psl) && (hasher <= crc_hash(bucket.key) & local_mask)) {
                 std::swap(key, bucket.key);
                 std::swap(val, bucket.val);
                 std::swap(psl, bucket.psl);
@@ -85,7 +100,7 @@ public:
     T_r* find(const T& key) {
         auto* buckets = b.data();
         const size_t local_mask = mask;
-        size_t idx = splitmix64(static_cast<std::uint64_t>(std::hash<T>{}(key))) & local_mask;
+        size_t idx = crc_hash(key) & local_mask;
         size_t cpsl = 0;
 
         while (true) {
@@ -104,7 +119,6 @@ public:
         }
         return end();
     }
-
 
 
     friend std::ostream& operator<<(std::ostream& os, const RHMap& obj) {

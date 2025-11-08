@@ -4,6 +4,7 @@
 #include <vector>
 #include <chrono>
 #include "utils.h"
+#include <zlib.h>
 #define H 64
 
 template<typename T, typename T_r>
@@ -56,6 +57,7 @@ private:
         }
     }
 
+
 public:
 
     HopscotchMap() : capacity([]() {
@@ -73,7 +75,7 @@ public:
     }
 
     void emplace(T key, T_r val) {
-        size_t idx = std::hash<T>{}(key) & mask; // hash of key to be inserted
+        size_t idx = crc_hash(key) & mask; // hash of key to be inserted
         size_t og_idx = idx; // save original key hash for future reference
         HopBucket<T, T_r>* bucket = &b[idx];
         while (bucket->is_occupied) { // linear search to find empty Hopbucket
@@ -148,7 +150,7 @@ public:
     T_r* end() { return nullptr; }
 
     T_r* find(const T& key) {
-        const size_t idx = std::hash<T>{}(key) & mask;
+        const size_t idx = crc_hash(key) & mask;
         HopBucket<T, T_r>& bucket = b[idx];
         if (bucket.is_occupied && bucket.key == key) {
             return &bucket.val;
