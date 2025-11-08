@@ -32,6 +32,7 @@ uint64_t crc_hash(const T& key) {
 		return crc64(*(uint64_t*)&key) * 0x2545F4914F6CDD1D;
 	} else {
 		std::cout << "Unsupported key type for hashing" << std::endl;
+		return 0LL;
 	}
 }
 

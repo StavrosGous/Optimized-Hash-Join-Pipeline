@@ -33,7 +33,7 @@ struct JoinAlgorithm {
             std::conditional_t<HASH_MAP == 1,
                 HopscotchMap<T, std::vector<size_t>>,
                 CuckooMap<T, std::vector<size_t>>>>;
-        hashmap_type hash_table(build_left ? left.size() << 1 : right.size() << 1);
+        hashmap_type hash_table(build_left ? left.size() * 1.6 : right.size() * 1.6);
         if (build_left) {
             for (auto&& [idx, record]: left | views::enumerate) {
                 std::visit(
