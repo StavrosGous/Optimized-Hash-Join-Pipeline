@@ -84,10 +84,6 @@ public:
                 return;
             }
             idx = (idx + 1) & mask;
-            if (idx == og_idx) { // full table, need to rehash
-                rehash();
-                return;
-            }
             bucket = &b[idx];
         }
         size_t pos = idx; // saving position of empty Hopbucket
