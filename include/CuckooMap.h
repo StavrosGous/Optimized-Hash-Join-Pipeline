@@ -40,19 +40,18 @@ private:
     size_t count1;
     size_t count2;
     size_t capacity;
+    size_t total;
     size_t mask;
 
-    size_t murmur_hash(const T& key) const {
-        const uint64_t seed = 0x9e3779b97f4a7c15ULL;
-        return static_cast<size_t>(murmur_hash_64(&key, sizeof(T), seed));
-    }
+
 
     void rehash() {
-        std::vector<CBucket<T, T_r>> old_b1 = b1;
-        std::vector<CBucket<T, T_r>> old_b2 = b2;
+        std::vector<CBucket<T, T_r>> old_b1 = std::move(b1);
+        std::vector<CBucket<T, T_r>> old_b2 = std::move(b2);
         b1.clear();
         b2.clear();
-        capacity <<= 1;
+        capacity *= 2;
+        total = capacity * 2;
         b1.resize(capacity);
         b2.resize(capacity);
         mask = capacity - 1;
@@ -70,17 +69,17 @@ private:
         }
     }
 
-
-
 public:
-    CuckooMap() : count1(0), count2(0), capacity([]() {
-        size_t cap = CAPACITY;
-        size_t half = cap > 1 ? (cap >> 1) : 1;
-        if (half <= 1) {
-            return static_cast<size_t>(1);
-        }
-        return static_cast<size_t>(1ULL << (sizeof(size_t) * 8 - __builtin_clzll(half - 1)));
-    }()),
+    CuckooMap() : count1(0), count2(0),
+        capacity([]() {
+            size_t cap = CAPACITY;
+            size_t half = cap > 1 ? (cap >> 1) : 1;
+            if (half <= 1) {
+                return static_cast<size_t>(1);
+            }
+            return static_cast<size_t>(1ULL << (sizeof(size_t) * 8 - __builtin_clzll(half - 1)));
+        }()),
+        total(this->capacity * 2),
         mask(this->capacity - 1)
     {
         b1.resize(this->capacity);
@@ -96,6 +95,7 @@ public:
             }
             return static_cast<size_t>(1ULL << (sizeof(size_t) * 8 - __builtin_clzll(half - 1)));
         }()),
+        total(this->capacity * 2),
         mask(this->capacity - 1)
     {
         b1.resize(this->capacity);
@@ -105,30 +105,26 @@ public:
     
 
     void emplace(T key, T_r val) {
-        // rehash if any table exceeds the load factor
-        if (count1 >= capacity * LOAD_FACTOR || count2 >= capacity * LOAD_FACTOR) {
+        // if combined sizes for the 2 tables exceed load factor, rehash
+        if ((count1 + count2) >= total * LOAD_FACTOR) {
             rehash();
         }
 
+        size_t local_mask = mask;
         // calculate remaining kicks allowed
-        size_t kicks_remaining = capacity + 1;
+        size_t kicks_remaining = count1 + count2 + 1;
         bool place_in_first  = true;
 
         while (true) {
             /// according to the current table working use its values
             auto& table = place_in_first ? b1 : b2;
             auto& table_count = place_in_first ? count1 : count2;
-            size_t index = (place_in_first ? crc_hash(key) : murmur_hash(&key)) & mask;
+            size_t index = (place_in_first ? crc_hash(key) : std::hash<T>{}(key)) & local_mask;
             auto& bucket = table[index];
 
             if (!bucket.is_occupied) {
                 bucket.update(std::move(key), std::move(val));
                 ++table_count;
-                return;
-            }
-
-            if (bucket.key == key) {
-                bucket.val = std::move(val);
                 return;
             }
             // kick the current element out
@@ -138,8 +134,8 @@ public:
             // if no kicks remaining the 2 tables are full and we must rehash
             if (--kicks_remaining == 0) {
                 rehash();
-                emplace(std::move(key), std::move(val));
-                return;
+                kicks_remaining = count1 + count2 + 1;
+                place_in_first  = true;
             }
         }
     }
@@ -147,58 +143,20 @@ public:
     T_r* end() { return nullptr; }
 
     T_r* find(const T& key) {
-        size_t index1 = crc_hash(key) & mask;
-        auto& bucket1 = b1[index1];
-        if (bucket1.is_occupied && bucket1.key == key) {
-            return &bucket1.val;
+        size_t local_mask = mask;
+        size_t idx1 = crc_hash(key) & local_mask;
+        CBucket<T, T_r> *bucket1 = &b1[idx1];
+        if (bucket1->is_occupied && bucket1->key == key) {
+            return &bucket1->val;
         }
 
-        size_t index2 = murmur_hash(key) & mask;
-        auto&  bucket2 = b2[index2];
-        if (bucket2.is_occupied && bucket2.key == key) {
-            return &bucket2.val;
+        size_t idx2 = std::hash<T>{}(key) & local_mask;
+        CBucket<T, T_r> *bucket2 = &b2[idx2];
+        if (bucket2->is_occupied && bucket2->key == key) {
+            return &bucket2->val;
         }
 
         return end();
     }
 
-
-    size_t get_capacity() const { return capacity; }
-
-    friend std::ostream& operator<<(std::ostream& os, const CuckooMap& obj) {
-        os << "CuckooMap(size1=" << obj.count1 << ", size2=" << obj.count2 << ", capacity=" << obj.capacity << ")\n";
-        os << "Table 1:\n";
-        for (size_t i = 0; i < obj.b1.size(); ++i) {
-            const auto& bucket = obj.b1[i];
-            os << "[" << i << "] ";
-            if (!bucket.is_occupied) {
-                os << "<empty>";
-            } else {
-                os << "key=" << bucket.key << ", vals=[";
-                for (size_t j = 0; j < bucket.val.size(); ++j) {
-                    os << bucket.val[j];
-                    if (j + 1 < bucket.val.size()) os << ", ";
-                }
-                os << "]";
-            }
-            os << "\n";
-        }
-        os << "Table 2:\n";
-        for (size_t i = 0; i < obj.b2.size(); ++i) {
-            const auto& bucket = obj.b2[i];
-            os << "[" << i << "] ";
-            if (!bucket.is_occupied) {
-                os << "<empty>";
-            } else {
-                os << "key=" << bucket.key << ", vals=[";
-                for (size_t j = 0; j < bucket.val.size(); ++j) {
-                    os << bucket.val[j];
-                    if (j + 1 < bucket.val.size()) os << ", ";
-                }
-                os << "]";
-            }
-            os << "\n";
-        }
-        return os;
-    }
 };

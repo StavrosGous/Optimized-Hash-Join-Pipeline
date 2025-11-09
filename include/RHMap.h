@@ -15,17 +15,19 @@ class Bucket {
 private:
     T key;
     T_r val;
-    size_t psl;
+    size_t psl; // probe sequence length used by robin hood balancing
     bool is_occupied;
+    size_t home_idx; // index where this key originally hashed to
 
 public:
-    Bucket() : key(), val(), psl(0), is_occupied(false) {}
+    Bucket() : key(), val(), psl(0), is_occupied(false), home_idx(0) {}
 
-    void update(T&& key, T_r&& val, size_t psl_val) {
+    void update(T &&key, T_r &&val, size_t &&psl, size_t &&home_idx) {
         this->key = std::move(key);
         this->val = std::move(val);
-        this->psl = psl_val;
+        this->psl = std::move(psl);
         this->is_occupied = true;
+        this->home_idx = std::move(home_idx);
     }
     
     friend class RHMap<T, T_r>;
@@ -35,18 +37,20 @@ public:
 template <typename T, typename T_r>
 class RHMap {
 private:
-    std::vector<Bucket<T, T_r>> b;
-    size_t count;
+    std::vector<Bucket<T, T_r>> b; // contiguous buckets backing the hash table
+    size_t count; // number of occupied buckets
     size_t capacity;
-    size_t mask;
+    size_t mask; // capacity - 1, enabling cheap modulo via bitmask when capacity is power of two
 
     void rehash() {
+        // resize to the next power-of-two bucket array so masks remain valid
         std::vector<Bucket<T, T_r>> old_buckets = b;
         b.clear();
+        // grow by doubling
         capacity *= 2;
-        capacity = capacity > 0 ? 1 << (sizeof(size_t) * 8 - __builtin_clzll(capacity - 1)) : 1;
         b.resize(capacity);
         mask = capacity - 1;
+        // reinsert existing entries to rebuild invariants
         count = 0;
         for (auto &old_bucket : old_buckets) {
             if (old_bucket.is_occupied) {
@@ -57,87 +61,65 @@ private:
 
     
 public:
-    RHMap() : count(0), capacity([]() {
-        size_t cap = CAPACITY;
-        return cap > 0 ? 1 << (sizeof(size_t) * 8 - __builtin_clzll(cap - 1)) : 1; }()),
+    RHMap() : count(0), capacity(CAPACITY),
          mask(this->capacity - 1)
     {
-        b.resize(this->capacity);
+        b.resize(this->capacity); // preallocate power-of-two bucket array for mask arithmetic
     }
     RHMap(const size_t &capacity) : count(0),
-        capacity(capacity > 0 ? 1 << (sizeof(size_t) * 8 - __builtin_clzll(capacity - 1)) : 1),
+        capacity(capacity > 0 ? 1 << (sizeof(size_t) * 8 - __builtin_clzll(capacity - 1)) : 1), // round up to next power-of-two for mask arithmetic
         mask(this->capacity - 1)
     {
         b.resize(this->capacity);
     }
 
     void emplace(T key, T_r val) {
-        auto* buckets = b.data();
-        const size_t local_mask = mask;
-        size_t hasher = crc_hash(key) & local_mask;
-        size_t idx = hasher;
-        size_t psl = 0;
+        size_t local_mask = mask;
+        size_t og_idx = crc_hash(key) & local_mask; // home position of the incoming key
+        size_t idx = og_idx;
+        size_t psl = 0; // probe sequence length of the incoming key
 
-        while (true) {
-            auto& bucket = buckets[idx];
-            if (!bucket.is_occupied) {
-                bucket.update(std::move(key), std::move(val), psl);
-                ++count;
-                return;
-            }
-            if ((bucket.psl < psl) && (hasher <= crc_hash(bucket.key) & local_mask)) {
-                std::swap(key, bucket.key);
-                std::swap(val, bucket.val);
-                std::swap(psl, bucket.psl);
+        Bucket<T, T_r>* bucket = &b[idx];
+        while (bucket->is_occupied) { // robin hood swap when newcomer probed longer
+            if (bucket->psl < psl) {
+                std::swap(key, bucket->key);
+                std::swap(val, bucket->val);
+                std::swap(psl, bucket->psl);
+                std::swap(og_idx, bucket->home_idx);
             }
             idx = (idx + 1) & local_mask;
             ++psl;
+            bucket = &b[idx];
+        }
+        bucket->update(std::move(key), std::move(val), std::move(psl), std::move(og_idx));
+        ++count;
+        if (count >= static_cast<size_t>(capacity * LOAD_FACTOR)) {
+            rehash();
         }
     }
+    
 
     T_r* end() { return nullptr; }
 
     T_r* find(const T& key) {
-        auto* buckets = b.data();
-        const size_t local_mask = mask;
-        size_t idx = crc_hash(key) & local_mask;
-        size_t cpsl = 0;
+        size_t local_mask = mask;
+        size_t idx = crc_hash(key) & local_mask; // start probing from home bucket
+        size_t cpsl = 0; // current probe length while scanning the cluster
 
-        while (true) {
-            auto& bucket = buckets[idx];
-            if (!bucket.is_occupied) {
-                return end();
+        Bucket<T, T_r>* bucket = &b[idx];
+        while (bucket->is_occupied) {
+            if (bucket->key == key) {
+                return &bucket->val;
             }
-            if (bucket.key == key) {
-                return &bucket.val;
-            }
-            if (bucket.psl < cpsl) {
+            if (bucket->psl < cpsl) {
+                // encountered a bucket that probed less: key cannot be further down the cluster
                 break;
             }
             idx = (idx + 1) & local_mask;
             ++cpsl;
+            bucket = &b[idx];
         }
         return end();
     }
 
-
-    friend std::ostream& operator<<(std::ostream& os, const RHMap& obj) {
-        os << "RHMap(size=" << obj.count << ", capacity=" << obj.capacity << ")\n";
-        for (size_t i = 0; i < obj.b.size(); ++i) {
-            const auto& bucket = obj.b[i];
-            os << "[" << i << "] ";
-            if (!bucket.is_occupied) {
-                os << "<empty>";
-            } else {
-                os << "key=" << bucket.key << ", psl=" << bucket.psl << ", vals=[";
-                for (size_t j = 0; j < bucket.val.size(); ++j) {
-                    os << bucket.val[j];
-                    if (j + 1 < bucket.val.size()) os << ", ";
-                }
-                os << "]";
-            }
-            if (i + 1 < obj.b.size()) os << '\n';
-        }
-        return os;
-    }
 };

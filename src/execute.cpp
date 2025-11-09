@@ -16,6 +16,26 @@ using ExecuteResult = std::vector<std::vector<Data>>;
 
 ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
 
+template <int MapId, typename Key>
+struct HashMapSelector {
+    static_assert(MapId >= 0 && MapId <= 2, "Unsupported HASH_MAP value");
+};
+
+template <typename Key>
+struct HashMapSelector<0, Key> {
+    using type = RHMap<Key, std::vector<size_t>>;
+};
+
+template <typename Key>
+struct HashMapSelector<1, Key> {
+    using type = HopscotchMap<Key, std::vector<size_t>>;
+};
+
+template <typename Key>
+struct HashMapSelector<2, Key> {
+    using type = CuckooMap<Key, std::vector<size_t>>;
+};
+
 struct JoinAlgorithm {
     bool                                             build_left;
     ExecuteResult&                                   left;
@@ -27,12 +47,7 @@ struct JoinAlgorithm {
     template <class T>
     auto run() {
         namespace views = ranges::views;
-        assert(HASH_MAP >=0 && HASH_MAP <=2);
-        using hashmap_type = std::conditional_t<HASH_MAP == 0,
-            RHMap<T, std::vector<size_t>>,
-            std::conditional_t<HASH_MAP == 1,
-                HopscotchMap<T, std::vector<size_t>>,
-                CuckooMap<T, std::vector<size_t>>>>;
+        using hashmap_type = typename HashMapSelector<HASH_MAP, T>::type;
         hashmap_type hash_table(build_left ? left.size() * 1.6 : right.size() * 1.6);
         if (build_left) {
             for (auto&& [idx, record]: left | views::enumerate) {
