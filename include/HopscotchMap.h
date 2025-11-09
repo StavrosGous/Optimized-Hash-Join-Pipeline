@@ -4,7 +4,11 @@
 #include <vector>
 #include <chrono>
 #include "utils.h"
+
+#ifndef H
 #define H 64
+#endif
+
 
 template<typename T, typename T_r>
 class HopscotchMap;
@@ -67,13 +71,7 @@ public:
         b.resize(this->capacity);
     }
 
-    HopscotchMap(const size_t &buildsize) : capacity([&buildsize]() {
-            size_t calculated = buildsize > 0 ? 1ULL << (sizeof(size_t) * 8 - __builtin_clzll(buildsize - 1)) : 1;
-            if (buildsize * 10 > calculated * 7) {
-                calculated <<= 1;
-            }
-            return calculated;
-        }()),
+    HopscotchMap(const size_t &buildsize) : capacity(buildsize > CAPACITY ? 1ULL << (sizeof(size_t) * 8 - __builtin_clzll(buildsize - 1)) : CAPACITY),
         count(0),
         mask(this->capacity - 1)
     {
