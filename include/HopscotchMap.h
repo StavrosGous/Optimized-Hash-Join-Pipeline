@@ -82,11 +82,6 @@ public:
         while (bucket->is_occupied) { // linear search to find empty Hopbucket
             idx = (idx + 1) & local_mask;
             bucket = &b[idx];
-            // if (__builtin_expect(idx == og_idx, 0)) { // table full, need to rehash
-            //     rehash();
-            //     emplace(std::move(key), std::move(val));
-            //     return;
-            // }
         }
         size_t pos = idx; // saving position of empty Hopbucket
         bucket->update(std::move(key), std::move(val), std::move(og_idx));
@@ -141,12 +136,7 @@ public:
             origin->bitmap |= origin_bit;
             origin->sz++; // increment size of neighbourhood
         }
-        if (origin->isFull()) { // After setting a bit in bitmap, check if neighbourhood is now full
-            // std::cout << "Rehashing due to full neighbourhood" << std::endl;
-            rehash();
-        }
-        if (count >= capacity * LOAD_FACTOR) {
-            // std::cout << "Rehashing due to load factor" << std::endl;
+        if (origin->isFull() || (count >= capacity * LOAD_FACTOR)) { // After setting a bit in bitmap, check if neighbourhood is now full
             rehash();
         }
     }

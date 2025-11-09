@@ -5,7 +5,7 @@
 # Responsibilities
 
 ## Robinhood
-Both are responsible for the RobinHood hashmap. We wrote the initial form of the emplace function  together with liveshare on Stavros' laptop. Afterwards, Stavros made some changes to fix a problem we had with duplicate entries and also tweeked the find method.
+We are both responsible for the RobinHood hashmap and are familiar with the code. The initial form of the emplace function was written with liveshare on Stavros' laptop.
 
 ## Hopscotch
 Ioannis is responsible for the Hopscotch hashmap. He wrote emplace, find and end methods.
