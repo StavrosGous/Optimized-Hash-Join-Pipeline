@@ -16,11 +16,13 @@ using ExecuteResult = std::vector<std::vector<Data>>;
 
 ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
 
+// HashMapSelector assertion for valid MapId values
 template <int MapId, typename Key>
 struct HashMapSelector {
     static_assert(MapId >= 0 && MapId <= 2, "Unsupported HASH_MAP value");
 };
 
+// Specializations for different hashmap implementations
 template <typename Key>
 struct HashMapSelector<0, Key> {
     using type = RHMap<Key, std::vector<size_t>>;
@@ -47,14 +49,15 @@ struct JoinAlgorithm {
     template <class T>
     auto run() {
         namespace views = ranges::views;
-        using hashmap_type = typename HashMapSelector<HASH_MAP, T>::type;
-        hashmap_type hash_table(build_left ? left.size() * 1.6 : right.size() * 1.6);
+        using hashmap_type = typename HashMapSelector<HASH_MAP, T>::type; // select map based on compilation flag HASH_MAP
+        hashmap_type hash_table(build_left ? left.size() * 1.6 : right.size() * 1.6); // preallocate with some extra space with fibonacci constant
         if (build_left) {
             for (auto&& [idx, record]: left | views::enumerate) {
                 std::visit(
                     [&hash_table, idx = idx](const auto& key) {
                         using Tk = std::decay_t<decltype(key)>;
                         if constexpr (std::is_same_v<Tk, T>) {
+                            // changed find and end interface to return pointer to value or nullptr instead of iterator
                             if (auto loc = hash_table.find(key); loc == hash_table.end()) {
                                 hash_table.emplace(key, std::vector<size_t>(1, idx));
                             } else {
@@ -71,6 +74,7 @@ struct JoinAlgorithm {
                     [&](const auto& key) {
                         using Tk = std::decay_t<decltype(key)>;
                         if constexpr (std::is_same_v<Tk, T>) {
+                            // changed find and end interface to return pointer to value or nullptr instead of iterator
                             if (auto loc = hash_table.find(key); loc != hash_table.end()) {
                                 for (auto left_idx: *loc) {
                                     auto&             left_record = left[left_idx];
@@ -99,6 +103,7 @@ struct JoinAlgorithm {
                     [&hash_table, idx = idx](const auto& key) {
                         using Tk = std::decay_t<decltype(key)>;
                         if constexpr (std::is_same_v<Tk, T>) {
+                            // changed find and end interface to return pointer to value or nullptr instead of iterator
                             if (auto loc = hash_table.find(key); loc == hash_table.end()) {
                                 hash_table.emplace(key, std::vector<size_t>(1, idx));
                             } else {
@@ -115,6 +120,7 @@ struct JoinAlgorithm {
                     [&](const auto& key) {
                         using Tk = std::decay_t<decltype(key)>;
                         if constexpr (std::is_same_v<Tk, T>) {
+                            // changed find and end interface to return pointer to value or nullptr instead of iterator
                             if (auto loc = hash_table.find(key); loc != hash_table.end()) {
                                 for (auto right_idx: *loc) {
                                     auto&             right_record = right[right_idx];

@@ -39,7 +39,7 @@ public:
 template<typename T, typename T_r>
 class HopscotchMap {
 private:
-    std::vector<HopBucket<T, T_r>> b;
+    std::vector<HopBucket<T, T_r>> b; // ring-buffer buckets giving us hop neighbourhoods
     size_t capacity;
     size_t mask;
     size_t count;

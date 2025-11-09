@@ -35,8 +35,8 @@ public:
 template <typename T, typename T_r>
 class CuckooMap {
 private:
-    std::vector<CBucket<T, T_r>> b1;
-    std::vector<CBucket<T, T_r>> b2;
+    std::vector<CBucket<T, T_r>> b1; // table hashed by crc_hash
+    std::vector<CBucket<T, T_r>> b2; // table hashed by std::hash
     size_t count1;
     size_t count2;
     size_t capacity;
@@ -46,6 +46,7 @@ private:
 
 
     void rehash() {
+        // rebuild both tables at double capacity to reduce kick cycles
         std::vector<CBucket<T, T_r>> old_b1 = std::move(b1);
         std::vector<CBucket<T, T_r>> old_b2 = std::move(b2);
         b1.clear();
@@ -89,7 +90,7 @@ public:
     CuckooMap(const size_t &capacity) : count1(0), count2(0),
         capacity([&capacity]() {
             size_t cap = capacity;
-            size_t half = cap > 1 ? (cap >> 1) : 1;
+            size_t half = cap > 1 ? (cap >> 1) : CAPACITY;
             if (half <= 1) {
                 return static_cast<size_t>(1);
             }
@@ -116,7 +117,7 @@ public:
         bool place_in_first  = true;
 
         while (true) {
-            /// according to the current table working use its values
+            // switch between tables after every kick to maintain cuckoo invariant
             auto& table = place_in_first ? b1 : b2;
             auto& table_count = place_in_first ? count1 : count2;
             size_t index = (place_in_first ? crc_hash(key) : std::hash<T>{}(key)) & local_mask;
@@ -134,8 +135,8 @@ public:
             // if no kicks remaining the 2 tables are full and we must rehash
             if (--kicks_remaining == 0) {
                 rehash();
-                kicks_remaining = count1 + count2 + 1;
-                place_in_first  = true;
+                emplace(std::move(key), std::move(val));
+                return;
             }
         }
     }
