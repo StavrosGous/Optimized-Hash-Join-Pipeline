@@ -76,7 +76,7 @@ public:
             size_t cap = CAPACITY;
             size_t half = cap > 1 ? (cap >> 1) : 1;
             if (half <= 1) {
-                return static_cast<size_t>(1);
+                return 1UL;
             }
             return static_cast<size_t>(1ULL << (sizeof(size_t) * 8 - __builtin_clzll(half - 1)));
         }()),
@@ -87,14 +87,17 @@ public:
         b2.resize(this->capacity);
     }
 
-    CuckooMap(const size_t &capacity) : count1(0), count2(0),
-        capacity([&capacity]() {
-            size_t cap = capacity;
-            size_t half = cap > 1 ? (cap >> 1) : CAPACITY;
-            if (half <= 1) {
+    CuckooMap(const size_t &buildsize) : count1(0), count2(0),
+        capacity([&buildsize]() {
+            size_t base = buildsize > 1 ? (buildsize >> 1) : 1;
+            if (base <= 1) {
                 return static_cast<size_t>(1);
             }
-            return static_cast<size_t>(1ULL << (sizeof(size_t) * 8 - __builtin_clzll(half - 1)));
+            size_t calculated = static_cast<size_t>(1ULL << (sizeof(size_t) * 8 - __builtin_clzll(base - 1)));
+            if (base * 10 > calculated * 7) {
+                calculated <<= 1;
+            }
+            return calculated;
         }()),
         total(this->capacity * 2),
         mask(this->capacity - 1)
@@ -107,7 +110,7 @@ public:
 
     void emplace(T key, T_r val) {
         // if combined sizes for the 2 tables exceed load factor, rehash
-        if ((count1 + count2) >= total * LOAD_FACTOR) {
+        if ((count1 + count2) * 10 > total * 7) {
             rehash();
         }
 

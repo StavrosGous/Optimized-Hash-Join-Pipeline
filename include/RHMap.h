@@ -66,8 +66,14 @@ public:
     {
         b.resize(this->capacity); // preallocate power-of-two bucket array for mask arithmetic
     }
-    RHMap(const size_t &capacity) : count(0),
-        capacity(capacity > 0 ? 1 << (sizeof(size_t) * 8 - __builtin_clzll(capacity - 1)) : CAPACITY), // round up to next power-of-two for mask arithmetic
+    RHMap(const size_t &buildsize) : count(0),
+        capacity([&buildsize]() {
+            size_t calculated = buildsize > 0 ? 1ULL << (sizeof(size_t) * 8 - __builtin_clzll(buildsize - 1)) : 1;
+            if (buildsize * 10 > calculated * 7) {
+                calculated <<= 1;
+            }
+            return calculated;
+        }()), // round up to next power-of-two for mask arithmetic and grow early if close to load factor threshold
         mask(this->capacity - 1)
     {
         b.resize(this->capacity);
@@ -93,7 +99,7 @@ public:
         }
         bucket->update(std::move(key), std::move(val), std::move(psl), std::move(og_idx));
         ++count;
-        if (count >= static_cast<size_t>(capacity * LOAD_FACTOR)) {
+        if (count * 10 > capacity * 7) {
             // keep average probe length bounded by expanding early
             rehash();
         }

@@ -67,7 +67,13 @@ public:
         b.resize(this->capacity);
     }
 
-    HopscotchMap(const size_t &capacity) : capacity(capacity > 0 ? 1 << (sizeof(size_t) * 8 - __builtin_clzll(capacity - 1)) : CAPACITY),
+    HopscotchMap(const size_t &buildsize) : capacity([&buildsize]() {
+            size_t calculated = buildsize > 0 ? 1ULL << (sizeof(size_t) * 8 - __builtin_clzll(buildsize - 1)) : 1;
+            if (buildsize * 10 > calculated * 7) {
+                calculated <<= 1;
+            }
+            return calculated;
+        }()),
         count(0),
         mask(this->capacity - 1)
     {
@@ -136,7 +142,7 @@ public:
             origin->bitmap |= origin_bit;
             origin->sz++; // increment size of neighbourhood
         }
-        if (origin->isFull() || (count >= capacity * LOAD_FACTOR)) { // After setting a bit in bitmap, check if neighbourhood is now full
+        if (origin->isFull() || (count * 10 > capacity * 7)) { // After setting a bit in bitmap, check if neighbourhood is now full
             rehash();
         }
     }

@@ -6,9 +6,7 @@
 #ifndef CAPACITY
 #define CAPACITY 64
 #endif
-#ifndef LOAD_FACTOR
-#define LOAD_FACTOR 0.7
-#endif
+
 
 
 static inline uint64_t crc64(uint64_t key) {
