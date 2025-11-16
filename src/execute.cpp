@@ -152,18 +152,33 @@ ExecuteResult execute_hash_join(const Plan&          plan,
         case DataType::INT32:   join_algorithm.run<int32_t>(); break;
         // case DataType::INT64:   join_algorithm.run<int64_t>(); break;
         // case DataType::FP64:    join_algorithm.run<double>(); break;
-        case DataType::VARCHAR: join_algorithm.run<std::string>(); break;
+        // case DataType::VARCHAR: join_algorithm.run<std::string>(); break;
         }
     } else {
         switch (std::get<1>(right_types[join.right_attr])) {
         case DataType::INT32:   join_algorithm.run<int32_t>(); break;
         // case DataType::INT64:   join_algorithm.run<int64_t>(); break;
         // case DataType::FP64:    join_algorithm.run<double>(); break;
-        case DataType::VARCHAR: join_algorithm.run<std::string>(); break;
+        // case DataType::VARCHAR: join_algorithm.run<std::string>(); break;
         }
     }
 
     return results;
+}
+
+// fetch value from columns
+value_t get_value_from_column_at_row(const Column& column, size_t row, DataType data_type) {
+    switch (data_type) {
+        
+        case DataType::INT32: {
+            // locate the page that contains the requested row
+        }
+
+        case DataType::VARCHAR: {
+            // locate the page that contains the requested row
+        }
+        
+    }
 }
 
 ExecuteResult execute_scan(const Plan&               plan,
@@ -171,7 +186,21 @@ ExecuteResult execute_scan(const Plan&               plan,
     const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
     auto                           table_id = scan.base_table_id;
     auto&                          input    = plan.inputs[table_id];
-    return Table::copy_scan(input, output_attrs);
+    ExecuteResult                results;
+    for (size_t row = 0; row < input.num_rows; ++row) {
+        std::vector<value_t> record;
+        record.reserve(output_attrs.size());
+        for (auto& [col_idx, data_type] : output_attrs) {
+            auto& column = input.columns[col_idx];
+            // Fetch value from the appropriate page
+            value_t value = get_value_from_column_at_row(column, row, data_type);
+            
+            
+            record.push_back(value);
+        }
+        results.push_back(std::move(record));
+    }
+    return results;
 }
 
 ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
