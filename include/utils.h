@@ -2,7 +2,6 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
-#include <zlib.h>
 #ifndef CAPACITY
 #define CAPACITY 64
 #endif
