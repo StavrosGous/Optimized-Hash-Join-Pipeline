@@ -7,7 +7,7 @@
 #include <iostream>
 
 #ifndef HASH_MAP
-#define HASH_MAP 0
+#define HASH_MAP 1
 #endif
 
 namespace Contest {
