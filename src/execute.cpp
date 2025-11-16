@@ -12,7 +12,25 @@
 
 namespace Contest {
 
-using ExecuteResult = std::vector<std::vector<Data>>;
+
+struct string_struct {
+    uint16_t table_id;
+    uint16_t col_id;
+    uint16_t page_id;
+    uint16_t offset;
+};
+
+struct value_t {
+    bool is_string;
+    bool is_null;
+    union {
+        int32_t       int32_val;
+        string_struct str_val;
+    };
+};
+
+// using ExecuteResult = std::vector<std::vector<Data>>;
+using ExecuteResult = std::vector<std::vector<value_t>>;
 
 ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
 
@@ -45,7 +63,7 @@ struct JoinAlgorithm {
     ExecuteResult&                                   results;
     size_t                                           left_col, right_col;
     const std::vector<std::tuple<size_t, DataType>>& output_attrs;
-
+    
     template <class T>
     auto run() {
         namespace views = ranges::views;
@@ -120,7 +138,7 @@ ExecuteResult execute_hash_join(const Plan&          plan,
     auto&                          right_types = right_node.output_attrs;
     auto                           left        = execute_impl(plan, left_idx);
     auto                           right       = execute_impl(plan, right_idx);
-    std::vector<std::vector<Data>> results;
+    std::vector<std::vector<value_t>> results;
 
     JoinAlgorithm join_algorithm{.build_left = join.build_left,
         .left                                = left,
