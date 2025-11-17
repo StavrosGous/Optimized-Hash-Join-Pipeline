@@ -13,3 +13,5 @@ shmeiwseis.txt
 main
 *.txt
 *tar.gz
+*.log
+*.out

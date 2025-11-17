@@ -5,6 +5,8 @@
 #include "CuckooMap.h"
 #include "HopscotchMap.h"
 #include <iostream>
+#include <cmath>
+#include "bitmap.h"
 
 #ifndef HASH_MAP
 #define HASH_MAP 1
@@ -78,51 +80,38 @@ struct JoinAlgorithm {
 
         // build phase: populate hash table with indices from build_side
         for (auto&& [idx, record] : build_side | views::enumerate) {
-            std::visit(
-                [&hash_table, idx = idx](const auto& key) {
-                    using Tk = std::decay_t<decltype(key)>;
-                    if constexpr (std::is_same_v<Tk, T>) {
-                        if (auto loc = hash_table.find(key); loc == hash_table.end()) {
-                            hash_table.emplace(key, std::vector<size_t>(1, idx));
-                        } else {
-                            loc->push_back(idx);
-                        }
-                    } else if constexpr (not std::is_same_v<Tk, std::monostate>) {
-                        throw std::runtime_error("wrong type of field");
-                    }
-                },
-                record[build_col]);
+            const auto& key = record[build_col];
+            if (!key.is_null) {
+                if (auto loc = hash_table.find(key.int32_val); loc == hash_table.end()) {
+                    hash_table.emplace(key.int32_val, std::vector<size_t>(1, idx));
+                } else {
+                    loc->push_back(idx);
+                }
+            }
         }
 
         // probe phase: for each probe record, lookup matches and emit joined rows
         for (auto& probe_record : probe_side) {
-            std::visit(
-                [&](const auto& key) {
-                    using Tk = std::decay_t<decltype(key)>;
-                    if constexpr (std::is_same_v<Tk, T>) {
-                        if (auto loc = hash_table.find(key); loc != hash_table.end()) {
-                            for (auto build_idx : *loc) {
-                                const auto& build_record = build_side[build_idx];
-                                // determine left/right pointers for output assembly
-                                const auto* left_record_ptr = build_left ? &build_record : &probe_record;
-                                const auto* right_record_ptr = build_left ? &probe_record : &build_record;
-                                std::vector<Data> new_record;
-                                new_record.reserve(output_attrs.size());
-                                for (auto [col_idx, _] : output_attrs) {
-                                    if (col_idx < left_record_ptr->size()) {
-                                        new_record.emplace_back((*left_record_ptr)[col_idx]);
-                                    } else {
-                                        new_record.emplace_back((*right_record_ptr)[col_idx - left_record_ptr->size()]);
-                                    }
-                                }
-                                results.emplace_back(std::move(new_record));
+            const auto& key = probe_record[probe_col];
+            if (!key.is_null) {
+                if (auto loc = hash_table.find(key.int32_val); loc != hash_table.end()) {
+                    for (auto build_idx : *loc) {
+                        const auto& build_record = build_side[build_idx];
+                        const auto* left_record_ptr = build_left ? &build_record : &probe_record;
+                        const auto* right_record_ptr = build_left ? &probe_record : &build_record;
+                        std::vector<value_t> new_record;
+                        new_record.reserve(output_attrs.size());
+                        for (auto [col_idx, _] : output_attrs) {
+                            if (col_idx < left_record_ptr->size()) {
+                                new_record.emplace_back((*left_record_ptr)[col_idx]);
+                            } else {
+                                new_record.emplace_back((*right_record_ptr)[col_idx - left_record_ptr->size()]);
                             }
                         }
-                    } else if constexpr (not std::is_same_v<Tk, std::monostate>) {
-                        throw std::runtime_error("wrong type of field");
+                        results.emplace_back(std::move(new_record));
                     }
-                },
-                probe_record[probe_col]);
+                }
+            }
         }
     }
 };
@@ -166,18 +155,98 @@ ExecuteResult execute_hash_join(const Plan&          plan,
     return results;
 }
 
+
+
 // fetch value from columns
-value_t get_value_from_column_at_row(const Column& column, size_t row, DataType data_type) {
+void build_column_inserter(const size_t table_id, const size_t col_id, const Column& column, DataType data_type, ExecuteResult& results) {
+    namespace views = ranges::views;
     switch (data_type) {
-        
         case DataType::INT32: {
             // locate the page that contains the requested row
+            auto& pages = column.pages;
+            size_t prev_row = 0;
+            for (auto& page : pages) {
+                // std::cout << "Processing INT32 page with data size " << PAGE_SIZE << std::endl;
+                // bytes 0 and 1 are a 2 byte number corresponding to number of rows 
+                uint16_t nr = static_cast<uint16_t>(page->data[0]);
+                // bytes 2 and 3 are a 2 byte number corresponding to number of non-nulls
+                uint16_t nv = static_cast<uint16_t>(page->data[2]);
+                auto* bitmap = reinterpret_cast<const uint8_t*>(page->data + PAGE_SIZE - (nr + 7) / 8);
+                for (size_t i = prev_row, k = 0; i < nr, k < nv; ++i) {
+                    size_t bitmap_idx = i / 8;
+                    size_t bit_idx = i % 8;
+                    value_t val;
+                    if (static_cast<uint8_t>(bitmap[bitmap_idx]) & (0x1 << bit_idx)) {
+                        val.is_string = false;
+                        val.is_null = true;
+                        results[i].push_back(val);
+                        continue;
+                    }
+                    val.is_string = false;
+                    val.is_null = false;
+                    val.int32_val = *reinterpret_cast<int32_t*>(&page->data[4 + k * 4]);
+                    results[i].push_back(val);
+                    k++;
+                }
+                prev_row += nr;
+            }
+            std::cout << "Finished INT32 column " << col_id << " of table " << table_id << std::endl;
+            break;
         }
-
         case DataType::VARCHAR: {
             // locate the page that contains the requested row
+            auto& pages = column.pages;
+            size_t prev_row = 0;
+            for (const auto& [idx, page] : pages | views::enumerate) {
+                // std::cout << "Processing VARCHAR page with data size " << PAGE_SIZE << std::endl;
+                // bytes 0 and 1 are a 2 byte number
+                uint16_t nr = static_cast<uint16_t>(page->data[0]);
+                uint16_t nchars = static_cast<uint16_t>(page->data[2]);
+                auto* bitmap = reinterpret_cast<const uint8_t*>(page->data + PAGE_SIZE - (nr + 7) / 8);
+                if (nr == 0xffff) {
+                    value_t val;
+                    val.is_string = true;
+                    val.is_null = false;
+                    val.str_val.table_id = table_id;
+                    val.str_val.col_id = col_id;
+                    val.str_val.page_id = idx;
+                    val.str_val.offset = 4;
+                    results[prev_row].push_back(val);
+                    prev_row += 1;
+                    continue;
+                }
+                else if (nr == 0xfffe) {
+                    // continue to next page
+                    continue;
+                }
+                size_t char_begin = 4 + nr * 2;
+                uint16_t next_offset = *reinterpret_cast<uint16_t*>(&page->data[4]);
+                for (size_t i = prev_row, k = 0; i < nr; ++i) {
+                    size_t bitmap_idx = i / 8;
+                    size_t bit_idx = i % 8;
+                    value_t val;
+                    if (static_cast<uint8_t>(bitmap[bitmap_idx]) & (0x1 << bit_idx)) {
+                        val.is_string = true;
+                        val.is_null = true;
+                        results[i].push_back(val);
+                        continue;
+                    }
+                    val.is_string = true;
+                    val.is_null = false;
+                    val.str_val.table_id = table_id;
+                    val.str_val.col_id = col_id;
+                    val.str_val.page_id = idx;
+                    val.str_val.offset = char_begin;
+                    results[i].push_back(val);
+                    char_begin = next_offset;
+                    next_offset = *reinterpret_cast<uint16_t*>(&page->data[4 + k * 2]);
+                    k++;
+                }
+                prev_row += nr;
+            }
+            std::cout << "Finished VARCHAR column " << col_id << " of table " << table_id << std::endl;
+            break;
         }
-        
     }
 }
 
@@ -186,45 +255,104 @@ ExecuteResult execute_scan(const Plan&               plan,
     const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
     auto                           table_id = scan.base_table_id;
     auto&                          input    = plan.inputs[table_id];
-    ExecuteResult                results;
-    for (size_t row = 0; row < input.num_rows; ++row) {
-        std::vector<value_t> record;
-        record.reserve(output_attrs.size());
-        for (auto& [col_idx, data_type] : output_attrs) {
-            auto& column = input.columns[col_idx];
-            // Fetch value from the appropriate page
-            value_t value = get_value_from_column_at_row(column, row, data_type);
-            
-            
-            record.push_back(value);
-        }
-        results.push_back(std::move(record));
+    ExecuteResult                results(input.num_rows);
+    std::cout << "Executing scan on table " << table_id << " with " << input.num_rows << " rows." <<std::endl;
+    for (auto& [col_idx, data_type] : output_attrs) {
+        auto& column = input.columns[col_idx];
+        build_column_inserter(table_id, col_idx, column, data_type, results);
     }
     return results;
 }
 
 ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
     auto& node = plan.nodes[node_idx];
+    std::cout << "Executing node " << node_idx << std::endl;
     return std::visit(
         [&](const auto& value) {
             using T = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<T, JoinNode>) {
+                std::cout << "Executing join node with idx " << node_idx << std::endl;
                 return execute_hash_join(plan, value, node.output_attrs);
             } else {
+                std::cout << "Executing scan node with idx " << node_idx << std::endl;
                 return execute_scan(plan, value, node.output_attrs);
             }
         },
         node.data);
 }
 
+ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& result, const std::vector<DataType>& types) {
+    ColumnarTable table;
+    table.num_rows = result.size();
+    for (size_t col_idx = 0; col_idx < types.size(); ++col_idx) {
+        Column column(types[col_idx]);
+        ColumnInserter<std::string> inserter_str{column};
+        ColumnInserter<int32_t> inserter_int32{column};
+
+        for (size_t row_idx = 0; row_idx < result.size(); ++row_idx) {
+            const auto& val = result[row_idx][col_idx];
+            if (val.is_null) {
+                if (types[col_idx] == DataType::INT32) {
+                    inserter_int32.insert_null();
+                } else if (types[col_idx] == DataType::VARCHAR) {
+                    inserter_str.insert_null();
+                }
+            } else {
+                if (val.is_string && types[col_idx] == DataType::VARCHAR) {
+                    // fetch string from corresponding page
+                    auto& table = plan.inputs[val.str_val.table_id];
+                    auto& column = table.columns[val.str_val.col_id];
+                    auto& page = column.pages[val.str_val.page_id];
+                    size_t offset = val.str_val.offset;
+                    std::string str;
+                    while (offset < PAGE_SIZE && static_cast<char>(page->data[offset]) != 0) {
+                        str.push_back(static_cast<char>(page->data[offset]));
+                        offset++;
+                    }
+                    inserter_str.insert(str);
+                } else if (!val.is_string && types[col_idx] == DataType::INT32) {
+                    inserter_int32.insert(val.int32_val);
+                } else {
+                    throw std::runtime_error("type mismatch when materializing columnar table");
+                }
+            }
+        }
+        inserter_int32.finalize();
+        inserter_str.finalize();
+        table.columns.push_back(std::move(column));
+    }
+    return table;
+}
+
 ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     namespace views = ranges::views;
+    // print all nodes that should be processed
+    std::cout << "Executing plan with " << plan.nodes.size() << " nodes." << std::endl;
+    for (size_t i = 0; i < plan.nodes.size(); ++i) {
+        std::cout << "Node " << i << ": ";
+        const auto& node = plan.nodes[i];
+        std::visit(
+            [&](const auto& value) {
+                using T = std::decay_t<decltype(value)>;
+                if constexpr (std::is_same_v<T, JoinNode>) {
+                    std::cout << "JoinNode" << std::endl;
+                } else {
+                    std::cout << "ScanNode" << std::endl;
+                }
+            },
+            node.data);
+    }       
     auto ret        = execute_impl(plan, plan.root);
-    auto ret_types  = plan.nodes[plan.root].output_attrs
-                   | views::transform([](const auto& v) { return std::get<1>(v); })
-                   | ranges::to<std::vector<DataType>>();
-    Table table{std::move(ret), std::move(ret_types)};
-    return table.to_columnar();
+    std::vector<DataType> ret_types;
+    std::cout << "eftasa" << std::endl;
+    ret_types.reserve(plan.nodes[plan.root].output_attrs.size());
+    std::cout << "eftasa" << std::endl;
+    for (const auto& attr : plan.nodes[plan.root].output_attrs) {
+        ret_types.push_back(std::get<1>(attr));
+    }
+
+    std::cout << "eftasa" << std::endl;
+    return materialize_columnar_table(plan, ret, ret_types);
 }
 
 void* build_context() {

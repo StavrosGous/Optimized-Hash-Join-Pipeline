@@ -4,7 +4,7 @@ if [ "$1" == "fast_plans" ]; then
     # build the fast executable using cmake
     #based on $2 arg do hash map selection default is 0 and is robin hood, 1 hopscotch, 2 cuckoo, if $2 not present use robin hood
     if [ -z "$2" ]; then
-        set -- "$2" "0"
+        set -- "$2" "1"
     fi
     if [ "$2" == "0" ]; then
         echo "-- Using hash map: Robin Hood"
@@ -27,7 +27,7 @@ elif [ "$1" == "main" ]; then
     # build default plans executable
     # same as fast plans
     if [ -z "$2" ]; then
-        set -- "$2" "0"
+        set -- "$2" "1"
     fi
     if [ "$2" == "0" ]; then
         echo "-- Using hash map: Robin Hood"
