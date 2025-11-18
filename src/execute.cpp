@@ -164,7 +164,7 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
         case DataType::INT32: {
             // locate the page that contains the requested row
             auto& pages = column.pages;
-            size_t prev_row = 0;
+            int cur_row = 0;
             for (auto& page : pages) {
                 // std::cout << "Processing INT32 page with data size " << PAGE_SIZE << std::endl;
                 // bytes 0 and 1 are a 2 byte number corresponding to number of rows 
@@ -172,23 +172,23 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                 // bytes 2 and 3 are a 2 byte number corresponding to number of non-nulls
                 uint16_t nv = static_cast<uint16_t>(page->data[2]);
                 auto* bitmap = reinterpret_cast<const uint8_t*>(page->data + PAGE_SIZE - (nr + 7) / 8);
-                for (size_t i = prev_row, k = 0; i < nr, k < nv; ++i) {
-                    size_t bitmap_idx = i / 8;
-                    size_t bit_idx = i % 8;
+                for (size_t i = 0, j = 0; j < nr; ++j, ++cur_row) {
+                    size_t byte_idx = j / 8;
+                    size_t bit_pos = j % 8;
                     value_t val;
-                    if (static_cast<uint8_t>(bitmap[bitmap_idx]) & (0x1 << bit_idx)) {
+                    if (static_cast<uint8_t>(bitmap[byte_idx]) & (1 << (7 - bit_pos))) {
                         val.is_string = false;
-                        val.is_null = true;
-                        results[i].push_back(val);
+                        val.is_null = false;
+                        val.int32_val = *reinterpret_cast<const int32_t*>(&page->data[4 + i*4]);
+                        results[cur_row].push_back(val);
+                        ++i;
                         continue;
                     }
                     val.is_string = false;
-                    val.is_null = false;
-                    val.int32_val = *reinterpret_cast<int32_t*>(&page->data[4 + k * 4]);
-                    results[i].push_back(val);
-                    k++;
+                    val.is_null = true;
+                    val.int32_val = -1;
+                    results[cur_row].push_back(val);
                 }
-                prev_row += nr;
             }
             std::cout << "Finished INT32 column " << col_id << " of table " << table_id << std::endl;
             break;
@@ -222,10 +222,10 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                 size_t char_begin = 4 + nr * 2;
                 uint16_t next_offset = *reinterpret_cast<uint16_t*>(&page->data[4]);
                 for (size_t i = prev_row, k = 0; i < nr; ++i) {
-                    size_t bitmap_idx = i / 8;
-                    size_t bit_idx = i % 8;
+                    size_t byte_idx = i / 8;
+                    size_t bit_pos = i % 8;
                     value_t val;
-                    if (static_cast<uint8_t>(bitmap[bitmap_idx]) & (0x1 << bit_idx)) {
+                    if (static_cast<uint8_t>(bitmap[byte_idx]) & (1 << (7 - bit_pos))) {
                         val.is_string = true;
                         val.is_null = true;
                         results[i].push_back(val);
@@ -259,8 +259,10 @@ ExecuteResult execute_scan(const Plan&               plan,
     std::cout << "Executing scan on table " << table_id << " with " << input.num_rows << " rows." <<std::endl;
     for (auto& [col_idx, data_type] : output_attrs) {
         auto& column = input.columns[col_idx];
+        std::cout << "Building column inserter for column " << col_idx << " of table " << table_id << std::endl;
         build_column_inserter(table_id, col_idx, column, data_type, results);
     }
+    std::cout << "Finished building column inserter for column " << col_idx << " of table " << table_id << std::endl;
     return results;
 }
 
@@ -284,6 +286,7 @@ ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
 ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& result, const std::vector<DataType>& types) {
     ColumnarTable table;
     table.num_rows = result.size();
+    std::cout << "Materializing columnar table with " << result.size() << " rows and " << types.size() << " columns." << std::endl;
     for (size_t col_idx = 0; col_idx < types.size(); ++col_idx) {
         Column column(types[col_idx]);
         ColumnInserter<std::string> inserter_str{column};
