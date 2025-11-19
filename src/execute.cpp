@@ -82,9 +82,11 @@ struct JoinAlgorithm {
         for (auto&& [idx, record] : build_side | views::enumerate) {
             const auto& key = record[build_col];
             // std::cout << "key: " << key.int32_val << std::endl;
+            // Cache key value to avoid redundant access
+            const auto& key_value = key.int32_val;
             if (!key.is_null) {
-                if (auto loc = hash_table.find(key.int32_val); loc == hash_table.end()) {
-                    hash_table.emplace(key.int32_val, std::vector<size_t>(1, idx));
+                if (auto loc = hash_table.find(key_value); loc == hash_table.end()) {
+                    hash_table.emplace(key_value, std::vector<size_t>(1, idx));
                     // Debug: Log keys being inserted into the hash table
                     // std::cout << "Building hash table with key: " << key.int32_val << ", index: " << idx << std::endl;
                 } else {
@@ -187,25 +189,27 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                 uint16_t nv;
                 memcpy(&nv, &page->data[2], sizeof(uint16_t));
 
-                // Fetch bitmap safely using memcpy
+                // Cache frequently used values to reduce redundant calculations
                 size_t bitmap_size = (nr + 7) / 8;
-                std::vector<uint8_t> bitmap(bitmap_size);
-                memcpy(bitmap.data(), page->data + PAGE_SIZE - bitmap_size, bitmap_size);
+                const uint8_t* bitmap_data = reinterpret_cast<const uint8_t*>(page->data) + PAGE_SIZE - bitmap_size;
+                size_t base_offset = 4;
 
                 for (size_t i = 0, j = 0; j < nr; ++j, ++cur_row) {
                     size_t byte_idx = j / 8;
                     size_t bit_pos = j % 8;
                     value_t val;
-                    if (bitmap[byte_idx] & (1 << bit_pos)) {
-                        val.is_string = false;
+
+                    if (bitmap_data[byte_idx] & (1 << bit_pos)) {
                         val.is_null = false;
-                        memcpy(&val.int32_val, &page->data[4 + i*4], sizeof(int32_t));
+                        val.is_string = false;
+                        memcpy(&val.int32_val, &page->data[base_offset + i * 4], sizeof(int32_t));
                         results[cur_row].push_back(val);
                         ++i;
                         continue;
                     }
-                    val.is_string = false;
+
                     val.is_null = true;
+                    val.is_string = false;
                     results[cur_row].push_back(val);
                 }
             }
@@ -217,17 +221,20 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
             auto& pages = column.pages;
             size_t cur_row = 0;
             for (const auto& [idx, page] : pages | views::enumerate) {
+                // Corrected the type conversion for page_data
+                const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
+
                 // Safely fetch 2-byte numbers using memcpy
                 uint16_t nr;
-                memcpy(&nr, &page->data[0], sizeof(uint16_t));
+                memcpy(&nr, &page_data[0], sizeof(uint16_t));
 
                 uint16_t nchars;
-                memcpy(&nchars, &page->data[2], sizeof(uint16_t));
+                memcpy(&nchars, &page_data[2], sizeof(uint16_t));
                 uint16_t nv = nchars;
+
                 // Fetch bitmap safely using memcpy
                 size_t bitmap_size = (nr + 7) / 8;
-                std::vector<uint8_t> bitmap(bitmap_size);
-                memcpy(bitmap.data(), page->data + PAGE_SIZE - bitmap_size, bitmap_size);
+                const uint8_t* bitmap_data = page_data + PAGE_SIZE - bitmap_size;
 
                 if (nr == 0xffff) {
                     value_t val;
@@ -245,12 +252,16 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                     // continue to next page
                     continue;
                 }
+                // Cache frequently used values to reduce redundant calculations
+                const uint8_t* bitmap_data_cached = reinterpret_cast<const uint8_t*>(page->data) + PAGE_SIZE - bitmap_size;
                 uint16_t end_offset_idx = 4;
+
                 for (size_t i = 0, j = 0; j < nr; ++j, ++cur_row) {
                     size_t byte_idx = j / 8;
                     size_t bit_pos = j % 8;
                     value_t val;
-                    if (bitmap[byte_idx] & (1 << bit_pos)) {
+
+                    if (bitmap_data_cached[byte_idx] & (1 << bit_pos)) {
                         val.is_string = true;
                         val.is_null = false;
                         val.str_val.table_id = table_id;
@@ -293,6 +304,7 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                         i++;
                         continue;
                     }
+
                     val.is_string = true;
                     val.is_null = true;
                     results[cur_row].push_back(val);
@@ -371,7 +383,7 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
                     memcpy(&nr, &page->data[0], sizeof(uint16_t));
                     uint16_t page_id = val.str_val.page_id;
                     bool is_long = false;
-                    std::cout << "Materializing " << (is_long ? "long" : "short") << " string from table " << val.str_val.table_id << ", column " << val.str_val.col_id << ", page " << val.str_val.page_id << ", offset " << val.str_val.offset << std::endl;
+                    // std::cout << "Materializing " << (is_long ? "long" : "short") << " string from table " << val.str_val.table_id << ", column " << val.str_val.col_id << ", page " << val.str_val.page_id << ", offset " << val.str_val.offset << std::endl;
                     while (nr == 0xffff || nr == 0xfffe) {
                         uint16_t nchars;
                         memcpy(&nchars, &page->data[2], sizeof(uint16_t));
