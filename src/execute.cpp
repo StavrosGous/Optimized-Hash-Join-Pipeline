@@ -6,7 +6,7 @@
 #include "HopscotchMap.h"
 #include <iostream>
 #include <cmath>
-#include "bitmap.h"
+// #include "bitmap.h"
 
 #ifndef HASH_MAP
 #define HASH_MAP 1
