@@ -76,36 +76,25 @@ struct JoinAlgorithm {
         const size_t build_col = build_left ? left_col : right_col;
         const size_t probe_col = build_left ? right_col : left_col;
 
-        hashmap_type hash_table(build_side.size() * 1.6); // preallocate with some extra space
-        // std::cout << "Building hash table with " << build_side.size() << " entries." << std::endl;
-        // build phase: populate hash table with indices from build_side
+        hashmap_type hash_table(build_side.size() * 1.6);
         for (auto&& [idx, record] : build_side | views::enumerate) {
             const auto& key = record[build_col];
-            // std::cout << "key: " << key.int32_val << std::endl;
-            // Cache key value to avoid redundant access
             const auto& key_value = key.int32_val;
             if (!key.is_null) {
                 if (auto loc = hash_table.find(key_value); loc == hash_table.end()) {
                     hash_table.emplace(key_value, std::vector<size_t>(1, idx));
-                    // Debug: Log keys being inserted into the hash table
-                    // std::cout << "Building hash table with key: " << key.int32_val << ", index: " << idx << std::endl;
                 } else {
                     loc->push_back(idx);
                 }
             }
         }
 
-        // probe phase: for each probe record, lookup matches and emit joined rows
+        // Added std::move to avoid unnecessary copies
         for (auto& probe_record : probe_side) {
             const auto& key = probe_record[probe_col];
-            // std::cout << "key: " << key.int32_val << std::endl;
             if (!key.is_null) {
-                // Debug: Log keys being probed
-                // std::cout << "Probing hash table with key: " << key.int32_val << std::endl;
                 if (auto loc = hash_table.find(key.int32_val); loc != hash_table.end()) {
                     for (auto build_idx : *loc) {
-                        // Debug: Log matches found
-                        // std::cout << "Match found for key: " << key.int32_val << ", build index: " << build_idx << std::endl;
                         const auto& build_record = build_side[build_idx];
                         const auto* left_record_ptr = build_left ? &build_record : &probe_record;
                         const auto* right_record_ptr = build_left ? &probe_record : &build_record;
@@ -118,8 +107,7 @@ struct JoinAlgorithm {
                                 new_record.emplace_back((*right_record_ptr)[col_idx - left_record_ptr->size()]);
                             }
                         }
-                        // std::cout << "Emitting joined record with " << new_record.size() << " columns." << std::endl;
-                        results.emplace_back(std::move(new_record));
+                        results.emplace_back(std::move(new_record)); // Use std::move to avoid copying
                     }
                 }
             }
@@ -134,13 +122,10 @@ ExecuteResult execute_hash_join(const Plan&          plan,
     auto                           right_idx   = join.right;
     auto&                          left_node   = plan.nodes[left_idx];
     auto&                          right_node  = plan.nodes[right_idx];
-    auto&                          left_types  = left_node.output_attrs;
-    auto&                          right_types = right_node.output_attrs;
+    auto&                          left_attr_vec  = left_node.output_attrs;
+    auto&                          right_attr_vec = right_node.output_attrs;
     auto                           left        = execute_impl(plan, left_idx);
     auto                           right       = execute_impl(plan, right_idx);
-    // print left adn right tables
-    // std::cout << "Left table has " << left.size() << " rows with idx " << left_idx << std::endl;
-    // std::cout << "Right table has " << right.size() << " rows with idx " << right_idx << std::endl;
     std::vector<std::vector<value_t>> results;
 
     JoinAlgorithm join_algorithm{.build_left = join.build_left,
@@ -151,22 +136,12 @@ ExecuteResult execute_hash_join(const Plan&          plan,
         .right_col                           = join.right_attr,
         .output_attrs                        = output_attrs};
     if (join.build_left) {
-        switch (std::get<1>(left_types[join.left_attr])) {
-        case DataType::INT32:   join_algorithm.run<int32_t>(); break;
-        // case DataType::INT64:   join_algorithm.run<int64_t>(); break;
-        // case DataType::FP64:    join_algorithm.run<double>(); break;
-        // case DataType::VARCHAR: join_algorithm.run<std::string>(); break;
-        }
+        join_algorithm.run<int32_t>();
     } else {
-        switch (std::get<1>(right_types[join.right_attr])) {
-        case DataType::INT32:   join_algorithm.run<int32_t>(); break;
-        // case DataType::INT64:   join_algorithm.run<int64_t>(); break;
-        // case DataType::FP64:    join_algorithm.run<double>(); break;
-        // case DataType::VARCHAR: join_algorithm.run<std::string>(); break;
-        }
+        join_algorithm.run<int32_t>();
     }
 
-    return results;
+    return std::move(results); // Use std::move to avoid copying
 }
 
 
@@ -180,61 +155,47 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
             auto& pages = column.pages;
             int cur_row = 0;
             for (auto& page : pages) {
-                // std::cout << "Processing INT32 page with data size " << PAGE_SIZE << std::endl;
-                // bytes 0 and 1 are a 2 byte number corresponding to number of rows 
                 uint16_t nr;
                 memcpy(&nr, &page->data[0], sizeof(uint16_t));
 
-                // bytes 2 and 3 are a 2 byte number corresponding to number of non-nulls
-                uint16_t nv;
-                memcpy(&nv, &page->data[2], sizeof(uint16_t));
+                // uint16_t nv;
+                // memcpy(&nv, &page->data[2], sizeof(uint16_t));
 
                 // Cache frequently used values to reduce redundant calculations
                 size_t bitmap_size = (nr + 7) / 8;
                 const uint8_t* bitmap_data = reinterpret_cast<const uint8_t*>(page->data) + PAGE_SIZE - bitmap_size;
                 size_t base_offset = 4;
-
-                for (size_t i = 0, j = 0; j < nr; ++j, ++cur_row) {
+                for (size_t cur_byte_idx = 0, j = 0; j < nr; ++j, ++cur_row) {
                     size_t byte_idx = j / 8;
                     size_t bit_pos = j % 8;
                     value_t val;
-
+                    val.is_string = false;
                     if (bitmap_data[byte_idx] & (1 << bit_pos)) {
                         val.is_null = false;
-                        val.is_string = false;
-                        memcpy(&val.int32_val, &page->data[base_offset + i * 4], sizeof(int32_t));
+                        memcpy(&val.int32_val, &page->data[base_offset + cur_byte_idx], sizeof(int32_t));
                         results[cur_row].push_back(val);
-                        ++i;
+                        cur_byte_idx += 4;
                         continue;
                     }
-
                     val.is_null = true;
-                    val.is_string = false;
                     results[cur_row].push_back(val);
                 }
             }
-            // std::cout << "Finished INT32 column " << col_id << " of table " << table_id << std::endl;
             break;
         }
         case DataType::VARCHAR: {
-            // locate the page that contains the requested row
             auto& pages = column.pages;
             size_t cur_row = 0;
             for (const auto& [idx, page] : pages | views::enumerate) {
-                // Corrected the type conversion for page_data
                 const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
-
-                // Safely fetch 2-byte numbers using memcpy
                 uint16_t nr;
                 memcpy(&nr, &page_data[0], sizeof(uint16_t));
 
-                uint16_t nchars;
-                memcpy(&nchars, &page_data[2], sizeof(uint16_t));
-                uint16_t nv = nchars;
+                // uint16_t nchars;
+                // memcpy(&nchars, &page_data[2], sizeof(uint16_t));
 
-                // Fetch bitmap safely using memcpy
                 size_t bitmap_size = (nr + 7) / 8;
-                const uint8_t* bitmap_data = page_data + PAGE_SIZE - bitmap_size;
+                const uint8_t* bitmap_data = reinterpret_cast<const uint8_t*>(page->data) + PAGE_SIZE - bitmap_size;
 
                 if (nr == 0xffff) {
                     value_t val;
@@ -244,75 +205,33 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                     val.str_val.col_id = col_id;
                     val.str_val.page_id = idx;
                     val.str_val.offset = 4;
-                    results[cur_row].push_back(val);
-                    cur_row++;
+                    results[cur_row++].push_back(val);
                     continue;
                 }
                 else if (nr == 0xfffe) {
                     // continue to next page
                     continue;
                 }
-                // Cache frequently used values to reduce redundant calculations
-                const uint8_t* bitmap_data_cached = reinterpret_cast<const uint8_t*>(page->data) + PAGE_SIZE - bitmap_size;
                 uint16_t end_offset_idx = 4;
-
-                for (size_t i = 0, j = 0; j < nr; ++j, ++cur_row) {
+                for (size_t j = 0; j < nr; ++j, ++cur_row) {
                     size_t byte_idx = j / 8;
                     size_t bit_pos = j % 8;
                     value_t val;
-
-                    if (bitmap_data_cached[byte_idx] & (1 << bit_pos)) {
-                        val.is_string = true;
+                    val.is_string = true;
+                    if (bitmap_data[byte_idx] & (1 << bit_pos)) {
                         val.is_null = false;
                         val.str_val.table_id = table_id;
                         val.str_val.col_id = col_id;
                         val.str_val.page_id = idx;
                         val.str_val.offset = end_offset_idx;
-                        // print start_offset, end_offset and the string
-                        // uint16_t start_offset;
-                        // uint16_t end_offset;
-                        // if (end_offset_idx > 4) {
-                        //     memcpy(&start_offset, &page->data[end_offset_idx - 2], sizeof(uint16_t));
-                        //     memcpy(&end_offset, &page->data[end_offset_idx], sizeof(uint16_t));
-                        //     start_offset += 4 + nr * 2;
-                        //     end_offset += 4 + nr * 2;
-                        //     // build string for debugging
-                        //     std::string str;
-                        //     for (size_t k = start_offset; k < end_offset; ++k) {
-                        //         str.push_back(static_cast<char>(page->data[k]));
-                        //     }
-                        //     // offsets
-                        //     // std::cout << "Start offset: " << start_offset << ", End offset: " << end_offset <<  " with nr "<< nr << std::endl;
-                        //     // std::cout << "String: " << str << std::endl;
-                        // }
-                        // else {
-                        //     start_offset = 4 + nr * 2;
-                        //     memcpy(&end_offset, &page->data[4], sizeof(uint16_t));
-                        //     end_offset += start_offset;
-                        //     // build string for debugging
-                        //     std::string str;
-                        //     for (size_t k = start_offset; k < end_offset; ++k) {
-                        //         str.push_back(static_cast<char>(page->data[k]));
-                        //     }
-                        //     // offsets
-                        //     // std::cout << "Start offset: " << start_offset << ", End offset: " << end_offset <<  " with nr "<< nr << std::endl;
-                        //     // std::cout << "String: " << str << std::endl;
-                        // }
-
                         results[cur_row].push_back(val);
                         end_offset_idx += 2;
-                        i++;
                         continue;
                     }
-
-                    val.is_string = true;
                     val.is_null = true;
                     results[cur_row].push_back(val);
-
                 }
-                
             }
-            // std::cout << "Finished VARCHAR column " << col_id << " of table " << table_id << std::endl;
             break;
         }
     }
@@ -324,111 +243,87 @@ ExecuteResult execute_scan(const Plan&               plan,
     auto                           table_id = scan.base_table_id;
     auto&                          input    = plan.inputs[table_id];
     ExecuteResult                results(input.num_rows);
-    // std::cout << "Executing scan on table " << table_id << " with " << input.num_rows << " rows." <<std::endl;
-    for (auto& [col_idx, data_type] : output_attrs) {
+    for (const auto& [col_idx, data_type] : output_attrs) { 
         auto& column = input.columns[col_idx];
-        // std::cout << "Building column inserter for column " << col_idx << " of table " << table_id << std::endl;
         build_column_inserter(table_id, col_idx, column, data_type, results);
-        // std::cout << "Finished building column inserter for column " << col_idx << " of table " << table_id << std::endl;
     }
-    return results;
+    return std::move(results);
 }
 
 ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
     auto& node = plan.nodes[node_idx];
-    // std::cout << "Executing node " << node_idx << std::endl;
-    return std::visit(
+    return std::move(std::visit(
         [&](const auto& value) {
             using T = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<T, JoinNode>) {
-                // std::cout << "Executing join node with idx " << node_idx << std::endl;
                 return execute_hash_join(plan, value, node.output_attrs);
             } else {
-                // std::cout << "Executing scan node with idx " << node_idx << std::endl;
                 return execute_scan(plan, value, node.output_attrs);
             }
         },
-        node.data);
+        node.data));
 }
 
-ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& result, const std::vector<DataType>& types) {
+ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& result, const std::vector<DataType>& attr_vec) {
     ColumnarTable table;
     table.num_rows = result.size();
-    // std::cout << "Materializing columnar table with " << result.size() << " rows and " << types.size() << " columns." << std::endl;
-    for (size_t col_idx = 0; col_idx < types.size(); ++col_idx) {
-        Column column(types[col_idx]);
+    for (size_t col_idx = 0; col_idx < attr_vec.size(); ++col_idx) {
+        Column column(attr_vec[col_idx]);
         ColumnInserter<std::string> inserter_str{column};
         ColumnInserter<int32_t> inserter_int32{column};
-        // std::cout << "Materializing column " << col_idx << " with result.size() = " << result.size() << std::endl;
         for (size_t row_idx = 0; row_idx < result.size(); ++row_idx) {
             const auto& val = result[row_idx][col_idx];
             if (val.is_null) {
-                if (types[col_idx] == DataType::INT32) {
-                    // std::cout << "Finished materializing column " << col_idx <<  " with value NULL" << std::endl;
+                if (attr_vec[col_idx] == DataType::INT32) {
                     inserter_int32.insert_null();
-                } else if (types[col_idx] == DataType::VARCHAR) {
-                    // std::cout << "Finished materializing column " << col_idx <<  " with value NULL" << std::endl;
+                } else if (attr_vec[col_idx] == DataType::VARCHAR) {
                     inserter_str.insert_null();
                 }
             } else {
-                if (val.is_string && types[col_idx] == DataType::VARCHAR) {
+                if (val.is_string) {
                     // fetch string from corresponding page
                     auto& table = plan.inputs[val.str_val.table_id];
                     auto& column = table.columns[val.str_val.col_id];
                     Page* page = column.pages[val.str_val.page_id];
                     size_t offset = val.str_val.offset;
                     std::string str;
-                    // find end offset
                     uint16_t nr;
                     memcpy(&nr, &page->data[0], sizeof(uint16_t));
                     uint16_t page_id = val.str_val.page_id;
                     bool is_long = false;
-                    // std::cout << "Materializing " << (is_long ? "long" : "short") << " string from table " << val.str_val.table_id << ", column " << val.str_val.col_id << ", page " << val.str_val.page_id << ", offset " << val.str_val.offset << std::endl;
                     while (nr == 0xffff || nr == 0xfffe) {
                         uint16_t nchars;
                         memcpy(&nchars, &page->data[2], sizeof(uint16_t));
-                        // read nchars characters and continue to next page if it is a long string
-                        for (size_t i = 4; i < nchars; ++i) {
+                        for (size_t i = 4; i < nchars + 4; ++i) {
                             str.push_back(static_cast<char>(page->data[i]));
                         }
-                        // move to next page
                         page_id++;
-                        memcpy(&nr, &column.pages[page_id]->data[0], sizeof(uint16_t));
                         page = column.pages[page_id];
+                        memcpy(&nr, &page->data[0], sizeof(uint16_t));
                         is_long = true;
                     }
                     if (!is_long) {
                         uint16_t end_offset_pos = offset;
                         uint16_t end_offset;
                         uint16_t start_offset;
+                        uint16_t base_offset = 4 + nr * 2;
                         if (end_offset_pos > 4) {
                             memcpy(&end_offset, &page->data[end_offset_pos], sizeof(uint16_t));
                             memcpy(&start_offset, &page->data[end_offset_pos - 2], sizeof(uint16_t));
-                            start_offset += 4 + nr * 2;
-                            end_offset += 4 + nr * 2;
-
-                        }
-                        else {
-                            start_offset = 4 + nr * 2;
+                            start_offset += base_offset;
+                            end_offset += base_offset;
+                        } else {
+                            start_offset = base_offset;
                             memcpy(&end_offset, &page->data[4], sizeof(uint16_t));
                             end_offset += start_offset;
                         }
-                        // from start_offset to end_offset is the string
                         for (size_t i = start_offset; i < end_offset; ++i) {
                             str.push_back(static_cast<char>(page->data[i]));
                         }
-                        // std::cout << "Materializing " << (is_long ? "long" : "short") << " string from table " << val.str_val.table_id << ", column " << val.str_val.col_id << ", page " << val.str_val.page_id << ", start offset " << start_offset << " end offset " << end_offset << std::endl;
-                        
                     }
-                    // std::cout << "Finished materializing column " << col_idx <<  " with value " << str << std::endl;
-                    
-                    // std::cout << "String value: " << str << std::endl;
                     inserter_str.insert(str);
-                } else if (!val.is_string && types[col_idx] == DataType::INT32) {
-                    // std::cout << "Finished materializing column " << col_idx <<  " with value " << val.int32_val << std::endl;
-                    inserter_int32.insert(val.int32_val);
                 } else {
-                    throw std::runtime_error("type mismatch when materializing columnar table");
+                    inserter_int32.insert(val.int32_val);
                 }
             }
         }
@@ -441,31 +336,13 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
 
 ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     namespace views = ranges::views;
-    // print all nodes that should be processed
-    // std::cout << "Executing plan with " << plan.nodes.size() << " nodes." << std::endl;
-    // for (size_t i = 0; i < plan.nodes.size(); ++i) {
-    //     std::cout << "Node " << i << ": ";
-    //     const auto& node = plan.nodes[i];
-    //     std::visit(
-    //         [&](const auto& value) {
-    //             using T = std::decay_t<decltype(value)>;
-    //             if constexpr (std::is_same_v<T, JoinNode>) {
-    //                 std::cout << "JoinNode" << std::endl;
-    //             } else {
-    //                 std::cout << "ScanNode" << std::endl;
-    //             }
-    //         },
-    //         node.data);
-    // }       
     auto ret        = execute_impl(plan, plan.root);
-    std::vector<DataType> ret_types;
-    ret_types.reserve(plan.nodes[plan.root].output_attrs.size());
+    std::vector<DataType> ret_attr_vec;
+    ret_attr_vec.reserve(plan.nodes[plan.root].output_attrs.size());
     for (const auto& attr : plan.nodes[plan.root].output_attrs) {
-        ret_types.push_back(std::get<1>(attr));
+        ret_attr_vec.push_back(std::get<1>(attr));
     }
-    // std::cout << "eftasa" << std::endl;
-
-    return materialize_columnar_table(plan, ret, ret_types);
+    return materialize_columnar_table(plan, ret, ret_attr_vec);
 }
 
 void* build_context() {
