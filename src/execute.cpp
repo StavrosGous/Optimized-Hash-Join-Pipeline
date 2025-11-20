@@ -6,6 +6,7 @@
 #include "HopscotchMap.h"
 #include <iostream>
 #include <cmath>
+#include <string_view>
 // #include "bitmap.h"
 
 #ifndef HASH_MAP
@@ -23,13 +24,27 @@ struct string_struct {
 };
 
 struct value_t {
-    bool is_string;
-    bool is_null;
+    // pack flags into a single byte using bitfields to reduce size and improve cache
+    unsigned is_string : 1;
+    unsigned is_null : 1;
     union {
         int32_t       int32_val;
         string_struct str_val;
     };
 };
+
+// Helper for faster unaligned reads on x86; replacing small memcpy calls
+// NOTE: This assumes little-endian and supports unaligned access which is valid on x86.
+template <typename P>
+static inline uint16_t read_u16(const P* p) {
+    return *reinterpret_cast<const uint16_t*>(reinterpret_cast<const void*>(p));
+}
+
+template <typename P>
+static inline int32_t read_i32(const P* p) {
+    return *reinterpret_cast<const int32_t*>(reinterpret_cast<const void*>(p));
+}
+
 
 // using ExecuteResult = std::vector<std::vector<Data>>;
 using ExecuteResult = std::vector<std::vector<value_t>>;
@@ -127,6 +142,8 @@ ExecuteResult execute_hash_join(const Plan&          plan,
     auto                           left        = execute_impl(plan, left_idx);
     auto                           right       = execute_impl(plan, right_idx);
     std::vector<std::vector<value_t>> results;
+    // Heuristic reservation: helps reduce reallocations for result storage
+    results.reserve(std::min(left.size() + right.size(), static_cast<size_t>(left.size() * 2)));
 
     JoinAlgorithm join_algorithm{.build_left = join.build_left,
         .left                                = left,
@@ -135,11 +152,7 @@ ExecuteResult execute_hash_join(const Plan&          plan,
         .left_col                            = join.left_attr,
         .right_col                           = join.right_attr,
         .output_attrs                        = output_attrs};
-    if (join.build_left) {
-        join_algorithm.run<int32_t>();
-    } else {
-        join_algorithm.run<int32_t>();
-    }
+    join_algorithm.run<int32_t>();
 
     return std::move(results); // Use std::move to avoid copying
 }
@@ -155,10 +168,10 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
             auto& pages = column.pages;
             int cur_row = 0;
             for (auto& page : pages) {
-                uint16_t nr;
-                memcpy(&nr, &page->data[0], sizeof(uint16_t));
+                const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
+                uint16_t nr = read_u16(page_data);
                 size_t bitmap_size = (nr + 7) / 8;
-                const uint8_t* bitmap_data = reinterpret_cast<const uint8_t*>(page->data) + PAGE_SIZE - bitmap_size;
+                const uint8_t* bitmap_data = reinterpret_cast<const uint8_t*>(page_data) + PAGE_SIZE - bitmap_size;
                 size_t base_offset = 4;
                 for (size_t cur_byte_idx = 0, j = 0; j < nr; ++j, ++cur_row) {
                     size_t byte_idx = j / 8;
@@ -167,7 +180,7 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                     val.is_string = false;
                     if (bitmap_data[byte_idx] & (1 << bit_pos)) [[likely]] {
                         val.is_null = false;
-                        memcpy(&val.int32_val, &page->data[base_offset + cur_byte_idx], sizeof(int32_t));
+                        val.int32_val = read_i32(page_data + base_offset + cur_byte_idx);
                         results[cur_row].push_back(val);
                         cur_byte_idx += 4;
                         continue;
@@ -183,8 +196,7 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
             size_t cur_row = 0;
             for (const auto& [idx, page] : pages | views::enumerate) {
                 const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
-                uint16_t nr;
-                memcpy(&nr, &page_data[0], sizeof(uint16_t));
+                uint16_t nr = read_u16(page_data);
 
                 // uint16_t nchars;
                 // memcpy(&nchars, &page_data[2], sizeof(uint16_t));
@@ -238,6 +250,12 @@ ExecuteResult execute_scan(const Plan&               plan,
     auto                           table_id = scan.base_table_id;
     auto&                          input    = plan.inputs[table_id];
     ExecuteResult                results(input.num_rows);
+    // Reserve inner vector capacity once, before the first column inserter is called
+    if (!output_attrs.empty()) {
+        for (auto &row : results) {
+            row.reserve(output_attrs.size());
+        }
+    }
     for (const auto& [col_idx, data_type] : output_attrs) { 
         auto& column = input.columns[col_idx];
         build_column_inserter(table_id, col_idx, column, data_type, results);
@@ -280,26 +298,29 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
                     auto& table = plan.inputs[val.str_val.table_id];
                     auto& column = table.columns[val.str_val.col_id];
                     Page* page = column.pages[val.str_val.page_id];
+                    const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
                     size_t offset = val.str_val.offset;
                     std::string str;
+                    std::string_view sview{nullptr, 0};
                     uint16_t nr;
-                    memcpy(&nr, &page->data[0], sizeof(uint16_t));
+                    memcpy(&nr, &page_data[0], sizeof(uint16_t));
                     uint16_t page_id = val.str_val.page_id;
                     bool is_long = false;
                     if (nr == 0xffff) [[unlikely]] {
-                        uint16_t nchars;
-                        memcpy(&nchars, &page->data[2], sizeof(uint16_t));
-                        str.assign(reinterpret_cast<const char*>(page->data + 4), nchars);
+                        uint16_t nchars = read_u16(page_data + 2);
+                        str.assign(reinterpret_cast<const char*>(page_data + 4), nchars);
                         page_id++;
                         page = column.pages[page_id];
-                        memcpy(&nr, &page->data[0], sizeof(uint16_t));
+                        page_data = reinterpret_cast<const uint8_t*>(page->data);
+                        nr = read_u16(page_data);
                         is_long = true;
                         while (nr == 0xfffe) [[likely]] {
-                            memcpy(&nchars, &page->data[2], sizeof(uint16_t));
-                            str.append(reinterpret_cast<const char*>(page->data + 4), nchars);
+                            nchars = read_u16(page_data + 2);
+                            str.append(reinterpret_cast<const char*>(page_data + 4), nchars);
                             page_id++;
                             page = column.pages[page_id];
-                            memcpy(&nr, &page->data[0], sizeof(uint16_t));
+                            page_data = reinterpret_cast<const uint8_t*>(page->data);
+                            nr = read_u16(page_data);
                         }
                     }
                     if (!is_long) [[likely]]{
@@ -308,18 +329,19 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
                         uint16_t start_offset;
                         uint16_t base_offset = 4 + nr * 2;
                         if (end_offset_pos > 4) {
-                            memcpy(&end_offset, &page->data[end_offset_pos], sizeof(uint16_t));
-                            memcpy(&start_offset, &page->data[end_offset_pos - 2], sizeof(uint16_t));
-                            start_offset += base_offset;
-                            end_offset += base_offset;
+                            end_offset = read_u16(page_data + end_offset_pos) + base_offset;
+                            start_offset = read_u16(page_data + end_offset_pos - 2) + base_offset;
                         } else {
                             start_offset = base_offset;
-                            memcpy(&end_offset, &page->data[4], sizeof(uint16_t));
-                            end_offset += start_offset;
+                            end_offset = read_u16(page_data + 4) + base_offset;
                         }
-                        str.assign(reinterpret_cast<const char*>(page->data + start_offset), end_offset - start_offset);
+                        sview = std::string_view(reinterpret_cast<const char*>(page_data + start_offset), end_offset - start_offset);
                     }
-                    inserter_str.insert(str);
+                    if (is_long) {
+                        inserter_str.insert(str);
+                    } else {
+                        inserter_str.insert(sview);
+                    }
                 } else {
                     inserter_int32.insert(val.int32_val);
                 }

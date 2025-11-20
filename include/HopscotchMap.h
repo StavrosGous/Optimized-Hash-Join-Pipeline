@@ -21,14 +21,14 @@ private:
     T_r val;
     uint64_t bitmap;
     size_t home_idx;
-    int sz;
-    bool is_occupied;
+    uint8_t sz; // neighbourhood size - small value fits in 8 bits
+    unsigned is_occupied : 1; // packed flag for occupancy
     bool isFull() const {
         return sz == H;
     }
 
 public:
-    HopBucket() : key(), val(), bitmap(0), home_idx(0), sz(0), is_occupied(false) {}
+    HopBucket() : key(), val(), bitmap(0), home_idx(0), sz(0), is_occupied(0) {}
 
     void update(T &&key, T_r &&val, size_t &&home_idx) {
         this->key = std::move(key);
