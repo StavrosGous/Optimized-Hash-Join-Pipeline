@@ -102,9 +102,9 @@ struct JoinAlgorithm {
                         new_record.reserve(output_attrs.size());
                         for (auto [col_idx, _] : output_attrs) {
                             if (col_idx < left_record_ptr->size()) {
-                                new_record.emplace_back((*left_record_ptr)[col_idx]);
+                                new_record.emplace_back(std::move((*left_record_ptr)[col_idx]));
                             } else {
-                                new_record.emplace_back((*right_record_ptr)[col_idx - left_record_ptr->size()]);
+                                new_record.emplace_back(std::move((*right_record_ptr)[col_idx - left_record_ptr->size()]));
                             }
                         }
                         results.emplace_back(std::move(new_record)); // Use std::move to avoid copying
@@ -157,11 +157,6 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
             for (auto& page : pages) {
                 uint16_t nr;
                 memcpy(&nr, &page->data[0], sizeof(uint16_t));
-
-                // uint16_t nv;
-                // memcpy(&nv, &page->data[2], sizeof(uint16_t));
-
-                // Cache frequently used values to reduce redundant calculations
                 size_t bitmap_size = (nr + 7) / 8;
                 const uint8_t* bitmap_data = reinterpret_cast<const uint8_t*>(page->data) + PAGE_SIZE - bitmap_size;
                 size_t base_offset = 4;
@@ -170,7 +165,7 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                     size_t bit_pos = j % 8;
                     value_t val;
                     val.is_string = false;
-                    if (bitmap_data[byte_idx] & (1 << bit_pos)) {
+                    if (bitmap_data[byte_idx] & (1 << bit_pos)) [[likely]] {
                         val.is_null = false;
                         memcpy(&val.int32_val, &page->data[base_offset + cur_byte_idx], sizeof(int32_t));
                         results[cur_row].push_back(val);
@@ -273,7 +268,7 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
         ColumnInserter<int32_t> inserter_int32{column};
         for (size_t row_idx = 0; row_idx < result.size(); ++row_idx) {
             const auto& val = result[row_idx][col_idx];
-            if (val.is_null) {
+            if (val.is_null) [[unlikely]] {
                 if (attr_vec[col_idx] == DataType::INT32) {
                     inserter_int32.insert_null();
                 } else if (attr_vec[col_idx] == DataType::VARCHAR) {
@@ -291,18 +286,23 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
                     memcpy(&nr, &page->data[0], sizeof(uint16_t));
                     uint16_t page_id = val.str_val.page_id;
                     bool is_long = false;
-                    while (nr == 0xffff || nr == 0xfffe) {
+                    if (nr == 0xffff) [[unlikely]] {
                         uint16_t nchars;
                         memcpy(&nchars, &page->data[2], sizeof(uint16_t));
-                        for (size_t i = 4; i < nchars + 4; ++i) {
-                            str.push_back(static_cast<char>(page->data[i]));
-                        }
+                        str.assign(reinterpret_cast<const char*>(page->data + 4), nchars);
                         page_id++;
                         page = column.pages[page_id];
                         memcpy(&nr, &page->data[0], sizeof(uint16_t));
                         is_long = true;
+                        while (nr == 0xfffe) [[likely]] {
+                            memcpy(&nchars, &page->data[2], sizeof(uint16_t));
+                            str.append(reinterpret_cast<const char*>(page->data + 4), nchars);
+                            page_id++;
+                            page = column.pages[page_id];
+                            memcpy(&nr, &page->data[0], sizeof(uint16_t));
+                        }
                     }
-                    if (!is_long) {
+                    if (!is_long) [[likely]]{
                         uint16_t end_offset_pos = offset;
                         uint16_t end_offset;
                         uint16_t start_offset;
@@ -317,9 +317,7 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
                             memcpy(&end_offset, &page->data[4], sizeof(uint16_t));
                             end_offset += start_offset;
                         }
-                        for (size_t i = start_offset; i < end_offset; ++i) {
-                            str.push_back(static_cast<char>(page->data[i]));
-                        }
+                        str.assign(reinterpret_cast<const char*>(page->data + start_offset), end_offset - start_offset);
                     }
                     inserter_str.insert(str);
                 } else {
