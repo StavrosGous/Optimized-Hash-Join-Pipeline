@@ -13,6 +13,10 @@
 #define HASH_MAP 1
 #endif
 
+
+#define MAX_PER_BUFFER_INT32 (PAGE_SIZE / sizeof(int32_t))
+#define MAX_PER_BUFFER_STRING (PAGE_SIZE / sizeof(string_struct))
+
 namespace Contest {
 
 
@@ -23,14 +27,30 @@ struct string_struct {
     uint16_t offset;
 };
 
-struct value_t {
-    // pack flags into a single byte using bitfields to reduce size and improve cache
-    unsigned is_string : 1;
-    unsigned is_null : 1;
-    union {
-        int32_t       int32_val;
-        string_struct str_val;
-    };
+union value_t {
+    int32_wrapper int32_val;
+    string_struct str_val;
+};
+
+struct buffer_t {
+    std::vector<uint64_t> data[PAGE_SIZE]; // 64-byte entries of type string_struct/int32_wrapper
+};
+
+struct int32_wrapper {
+    int32_t val;
+    int32_t status;
+    inline bool notNull() {
+        return status & 1;
+    }
+};
+
+struct column_t {
+    std::vector<buffer_t> buffers;
+    size_t                num_rows;
+    DataType              type;
+
+    column_t() : num_rows(0), type(DataType::INT32) {}
+    column_t(const DataType& dt) : num_rows(0), type(dt) {}
 };
 
 // Helper for faster unaligned reads on x86; replacing small memcpy calls
@@ -46,8 +66,8 @@ static inline int32_t read_i32(const P* p) {
 }
 
 
-// using ExecuteResult = std::vector<std::vector<Data>>;
-using ExecuteResult = std::vector<std::vector<value_t>>;
+// using ExecuteResult = std::vector<std::vector<value_t>>;
+using ExecuteResult = std::vector<column_t>;
 
 ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
 
@@ -141,7 +161,7 @@ ExecuteResult execute_hash_join(const Plan&          plan,
     auto&                          right_attr_vec = right_node.output_attrs;
     auto                           left        = execute_impl(plan, left_idx);
     auto                           right       = execute_impl(plan, right_idx);
-    std::vector<std::vector<value_t>> results;
+    std::vector<column_t> results;
     // Heuristic reservation: helps reduce reallocations for result storage
     results.reserve(std::min(left.size() + right.size(), static_cast<size_t>(left.size() * 2)));
 
@@ -160,12 +180,51 @@ ExecuteResult execute_hash_join(const Plan&          plan,
 
 
 // fetch value from columns
-void build_column_inserter(const size_t table_id, const size_t col_id, const Column& column, DataType data_type, ExecuteResult& results) {
+void build_column_inserter(const size_t table_id, const size_t col_id, const Column& column, DataType data_type, column_t& new_column) {
     namespace views = ranges::views;
     switch (data_type) {
         case DataType::INT32: {
             // locate the page that contains the requested row
             auto& pages = column.pages;
+            std::vector<buffer_t> buffers;
+            size_t cur_page = 0;
+            while (cur_page < pages.size()) {
+                buffer_t curbuf;
+                size_t rem = MAX_PER_BUFFER_INT32;
+                auto& page = pages[cur_page];
+                const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
+                uint16_t nr = read_u16(page_data);
+                size_t bitmap_size = (nr + 7) / 8;
+                const uint8_t* bitmap_data = reinterpret_cast<const uint8_t*>(page_data) + PAGE_SIZE - bitmap_size;
+                size_t base_offset = 4;
+                //Fill buf with the whole page
+                while (rem > nr && cur_page < pages.size()) {
+                    for (size_t i = 0; i < nr; ++i) {
+                        value_t val;
+                        size_t byte_idx = i / 8;
+                        size_t bit_pos = i % 8;
+                        if (bitmap_data[byte_idx] & (1 << bit_pos)) [[likely]] {
+                            val.int32_val = {read_i32(page_data + base_offset + 4 * nr), 1};
+                            curbuf.data.push_back(val);
+                            continue;
+                        }
+                    }
+                    rem -= nr;
+                    page_data = reinterpret_cast<const uint8_t*>(pages[++cur_page]->data);
+                    nr = read_u16(reinterpret_cast<const uint8_t*>(page->data));
+                }
+                //Fill remainder of buffer with as much is needed from the page
+                for (size_t i = 0; i < rem; ++i) {
+                        
+                        
+                    
+                    buffers.push_back(curbuf); // Bazoume to curbuf sto vector
+                    continue;
+                }
+                buffers.push_back(curbuf);
+                curbuf.values.clear();
+                curbuf.bitmap.clear();
+            }
             int cur_row = 0;
             for (auto& page : pages) {
                 const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
@@ -177,15 +236,12 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                     size_t byte_idx = j / 8;
                     size_t bit_pos = j % 8;
                     value_t val;
-                    val.is_string = false;
                     if (bitmap_data[byte_idx] & (1 << bit_pos)) [[likely]] {
-                        val.is_null = false;
                         val.int32_val = read_i32(page_data + base_offset + cur_byte_idx);
                         results[cur_row].push_back(val);
                         cur_byte_idx += 4;
                         continue;
                     }
-                    val.is_null = true;
                     results[cur_row].push_back(val);
                 }
             }
@@ -206,8 +262,6 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
 
                 if (nr == 0xffff) {
                     value_t val;
-                    val.is_string = true;
-                    val.is_null = false;
                     val.str_val.table_id = table_id;
                     val.str_val.col_id = col_id;
                     val.str_val.page_id = idx;
@@ -224,9 +278,7 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                     size_t byte_idx = j / 8;
                     size_t bit_pos = j % 8;
                     value_t val;
-                    val.is_string = true;
                     if (bitmap_data[byte_idx] & (1 << bit_pos)) {
-                        val.is_null = false;
                         val.str_val.table_id = table_id;
                         val.str_val.col_id = col_id;
                         val.str_val.page_id = idx;
@@ -235,7 +287,6 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                         end_offset_idx += 2;
                         continue;
                     }
-                    val.is_null = true;
                     results[cur_row].push_back(val);
                 }
             }
@@ -249,16 +300,12 @@ ExecuteResult execute_scan(const Plan&               plan,
     const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
     auto                           table_id = scan.base_table_id;
     auto&                          input    = plan.inputs[table_id];
-    ExecuteResult                results(input.num_rows);
+    ExecuteResult                results(input.columns.size());
     // Reserve inner vector capacity once, before the first column inserter is called
-    if (!output_attrs.empty()) {
-        for (auto &row : results) {
-            row.reserve(output_attrs.size());
-        }
-    }
     for (const auto& [col_idx, data_type] : output_attrs) { 
         auto& column = input.columns[col_idx];
-        build_column_inserter(table_id, col_idx, column, data_type, results);
+        results[col_idx] = column_t(data_type);
+        build_column_inserter(table_id, col_idx, column, data_type, results[col_idx]);
     }
     return std::move(results);
 }
@@ -293,6 +340,7 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
                     inserter_str.insert_null();
                 }
             } else {
+                
                 if (val.is_string) {
                     // fetch string from corresponding page
                     auto& table = plan.inputs[val.str_val.table_id];
