@@ -115,12 +115,20 @@ struct JoinAlgorithm {
         std::cout << "Starting build phase..." << std::endl;
         ExecuteResult temp_results;
         temp_results.resize(output_attrs.size());
-        
+
         std::cout << "trying to fetch build column with idx " << build_col << " build side size: " << build_side.size() << std::endl;
         const auto& build_column = build_side[build_col];
 
         std::cout << "trying to fetch probe column with idx " << probe_col << " probe side size: " << probe_side.size() << std::endl;
         const auto& probe_column = probe_side[probe_col];
+
+        // Fail-safe: if build or probe column is empty, return empty columns
+        if (build_column.buffers.empty() || probe_column.buffers.empty()) {
+            std::cout << "[HashJoin] Build or probe column is empty. Returning empty join result." << std::endl;
+            results.clear();
+            results.resize(output_attrs.size());
+            return;
+        }
 
         std::cout << "build column buffers size: " << build_column.buffers.size() << std::endl;
         for (auto [idx, buffer] : build_column.buffers | views::enumerate) {
@@ -296,6 +304,7 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                 size_t bitmap_size = (nr + 7) / 8;
                 const uint8_t* bitmap_data = reinterpret_cast<const uint8_t*>(page_data) + PAGE_SIZE - bitmap_size;
                 size_t base_offset = 4;
+                std::cout << "rows in page: " << nr << std::endl;
                 for (size_t i = 0; i < nr; ++i, ++cur_row) {
                     if (curbuf.data.size() == MAX_PER_BUFFER_ENTRY) {
                         buffers.push_back(curbuf);
@@ -304,6 +313,10 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                     size_t byte_idx = i / 8;
                     size_t bit_pos = i % 8;
                     value_t val;
+                    bool is_not_null = bitmap_data[byte_idx] & (1 << bit_pos);
+                    if (!is_not_null) {
+                        std::cout << "value is null" << std::endl;
+                    }
                     if (bitmap_data[byte_idx] & (1 << bit_pos)) [[likely]] {
                         val.int32_val.val = read_i32(page_data + base_offset + 4 * i);
                         val.int32_val.status = 1;
@@ -312,10 +325,13 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                     }
                     val.int32_val.status = 0;
                     curbuf.data.push_back(val);
-                    
                 }
             }
-            std::cout << "Total INT32 rows processed for column " << col_id << " of table " << table_id << ": " << cur_row << std::endl;
+            // Patch: push the last buffer if it has any data (handles single-row columns)
+            if (!curbuf.data.empty()) {
+                buffers.push_back(curbuf);
+            }
+            std::cout << "Total INT32 rows processed for column " << col_id << " of table " << table_id << ": " << cur_row << " and filled " << curbuf.data.size() << " entries." << std::endl;
             new_column.buffers = std::move(buffers);
             break;
         }
@@ -348,14 +364,20 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                     continue;
                 }
                 uint16_t end_offset_idx = 4;
-                for (size_t j = 0; j < nr; ++j, ++cur_row) {
+                std::cout << "rows in page: " << nr << std::endl;
+
+                for (size_t i = 0; i < nr; ++i, ++cur_row) {
                     if (curbuf.data.size() == MAX_PER_BUFFER_ENTRY) {
                         buffers.push_back(curbuf);
                         curbuf.data.clear();
                     }
-                    size_t byte_idx = j / 8;
-                    size_t bit_pos = j % 8;
+                    size_t byte_idx = i / 8;
+                    size_t bit_pos = i % 8;
                     value_t val;
+                    bool is_not_null = bitmap_data[byte_idx] & (1 << bit_pos);
+                    if (!is_not_null) {
+                        std::cout << "value is null" << std::endl;
+                    }
                     if (bitmap_data[byte_idx] & (1 << bit_pos)) {
                         val.str_val.table_id = table_id;
                         val.str_val.col_id = col_id;
@@ -372,7 +394,7 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                     curbuf.data.push_back(val);
                 }
             }
-            std::cout << "Total VARCHAR rows processed for column " << col_id << " of table " << table_id << ": " << cur_row << std::endl;
+            std::cout << "Total VARCHAR rows processed for column " << col_id << " of table " << table_id << ": " << cur_row << " and filled " << curbuf.data.size() << " entries." << std::endl;
             new_column.buffers = std::move(buffers);
             break;
         }
