@@ -14,8 +14,8 @@
 #endif
 
 
-#define MAX_PER_BUFFER_INT32 (PAGE_SIZE / sizeof(int32_t))
-#define MAX_PER_BUFFER_STRING (PAGE_SIZE / sizeof(string_struct))
+#define MAX_PER_BUFFER_ENTRY (PAGE_SIZE / sizeof(int64_t))
+
 
 namespace Contest {
 
@@ -27,15 +27,6 @@ struct string_struct {
     uint16_t offset;
 };
 
-union value_t {
-    int32_wrapper int32_val;
-    string_struct str_val;
-};
-
-struct buffer_t {
-    std::vector<uint64_t> data[PAGE_SIZE]; // 64-byte entries of type string_struct/int32_wrapper
-};
-
 struct int32_wrapper {
     int32_t val;
     int32_t status;
@@ -43,6 +34,16 @@ struct int32_wrapper {
         return status & 1;
     }
 };
+
+union value_t {
+    int32_wrapper int32_val;
+    string_struct str_val;
+};
+
+struct buffer_t {
+    std::vector<value_t> data; // 64-bit entries of type string_struct/int32_wrapper
+};
+
 
 struct column_t {
     std::vector<buffer_t> buffers;
@@ -52,6 +53,10 @@ struct column_t {
     column_t() : num_rows(0), type(DataType::INT32) {}
     column_t(const DataType& dt) : num_rows(0), type(dt) {}
 };
+
+// using ExecuteResult = std::vector<std::vector<value_t>>;
+using ExecuteResult = std::vector<column_t>;
+ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
 
 // Helper for faster unaligned reads on x86; replacing small memcpy calls
 // NOTE: This assumes little-endian and supports unaligned access which is valid on x86.
@@ -66,10 +71,6 @@ static inline int32_t read_i32(const P* p) {
 }
 
 
-// using ExecuteResult = std::vector<std::vector<value_t>>;
-using ExecuteResult = std::vector<column_t>;
-
-ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
 
 // HashMapSelector assertion for valid MapId values
 template <int MapId, typename Key>
@@ -100,53 +101,114 @@ struct JoinAlgorithm {
     ExecuteResult&                                   results;
     size_t                                           left_col, right_col;
     const std::vector<std::tuple<size_t, DataType>>& output_attrs;
-    
+
     template <class T>
     auto run() {
         namespace views = ranges::views;
-        using hashmap_type = typename HashMapSelector<HASH_MAP, T>::type; // select map based on compilation flag HASH_MAP
-        // choose build and probe sides uniformly to avoid duplicate branches
+        using hashmap_type = typename HashMapSelector<HASH_MAP, T>::type;
         auto& build_side = build_left ? left : right;
         auto& probe_side = build_left ? right : left;
         const size_t build_col = build_left ? left_col : right_col;
         const size_t probe_col = build_left ? right_col : left_col;
 
         hashmap_type hash_table(build_side.size() * 1.6);
-        for (auto&& [idx, record] : build_side | views::enumerate) {
-            const auto& key = record[build_col];
-            const auto& key_value = key.int32_val;
-            if (!key.is_null) {
-                if (auto loc = hash_table.find(key_value); loc == hash_table.end()) {
-                    hash_table.emplace(key_value, std::vector<size_t>(1, idx));
-                } else {
-                    loc->push_back(idx);
-                }
-            }
-        }
+        std::cout << "Starting build phase..." << std::endl;
+        ExecuteResult temp_results;
+        temp_results.resize(output_attrs.size());
+        
+        std::cout << "trying to fetch build column with idx " << build_col << " build side size: " << build_side.size() << std::endl;
+        const auto& build_column = build_side[build_col];
 
-        // Added std::move to avoid unnecessary copies
-        for (auto& probe_record : probe_side) {
-            const auto& key = probe_record[probe_col];
-            if (!key.is_null) {
-                if (auto loc = hash_table.find(key.int32_val); loc != hash_table.end()) {
-                    for (auto build_idx : *loc) {
-                        const auto& build_record = build_side[build_idx];
-                        const auto* left_record_ptr = build_left ? &build_record : &probe_record;
-                        const auto* right_record_ptr = build_left ? &probe_record : &build_record;
-                        std::vector<value_t> new_record;
-                        new_record.reserve(output_attrs.size());
-                        for (auto [col_idx, _] : output_attrs) {
-                            if (col_idx < left_record_ptr->size()) {
-                                new_record.emplace_back(std::move((*left_record_ptr)[col_idx]));
-                            } else {
-                                new_record.emplace_back(std::move((*right_record_ptr)[col_idx - left_record_ptr->size()]));
-                            }
-                        }
-                        results.emplace_back(std::move(new_record)); // Use std::move to avoid copying
+        std::cout << "trying to fetch probe column with idx " << probe_col << " probe side size: " << probe_side.size() << std::endl;
+        const auto& probe_column = probe_side[probe_col];
+
+        std::cout << "build column buffers size: " << build_column.buffers.size() << std::endl;
+        for (auto [idx, buffer] : build_column.buffers | views::enumerate) {
+            std::cout << "Processing build buffer index: " << idx << std::endl;
+            for (value_t val : buffer.data) {
+                int32_t key = val.int32_val.val;
+                std::cout << "Building key: " << key << " at buffer index: " << idx << std::endl;
+                if (val.int32_val.status) {
+                    if (auto loc = hash_table.find(key); loc == hash_table.end()) {
+                        hash_table.emplace(key, std::vector<size_t>{});
+                    } else {
+                        auto row_idx = idx * MAX_PER_BUFFER_ENTRY + (&val - (&buffer.data[0])) / sizeof(value_t);
+                        std::cout << "Row idx:" << row_idx << std::endl;
+                        loc->push_back(row_idx);
                     }
                 }
             }
         }
+
+        // For each probe row, check for matches and build output buffers row-wise
+        for (auto [probe_buf_idx, probe_buffer] : probe_column.buffers | views::enumerate) {
+            size_t probe_row_base = probe_buf_idx * MAX_PER_BUFFER_ENTRY;
+            for (size_t probe_row_offset = 0; probe_row_offset < probe_buffer.data.size(); ++probe_row_offset) {
+            const value_t& probe_val = probe_buffer.data[probe_row_offset];
+            int32_t key = probe_val.int32_val.val;
+            if (probe_val.int32_val.status) {
+                auto loc = hash_table.find(key);
+                if (loc != hash_table.end()) {
+                for (auto build_idx : *loc) {
+                    // For each output column, collect the value for this join result row
+                    std::vector<value_t> output_row;
+                    output_row.reserve(output_attrs.size());
+                    for (auto [out_idx, attr] : output_attrs | views::enumerate) {
+                    size_t col_idx = std::get<0>(attr);
+                    DataType dtype = std::get<1>(attr);
+                    const ExecuteResult& src_side = (build_left ? left : right);
+                    const ExecuteResult& other_side = (build_left ? right : left);
+                    size_t src_buf_idx, src_row_offset;
+                    if (col_idx < src_side.size()) {
+                        // Value comes from build side
+                        src_buf_idx = build_idx / MAX_PER_BUFFER_ENTRY;
+                        src_row_offset = build_idx % MAX_PER_BUFFER_ENTRY;
+                        output_row.push_back(src_side[col_idx].buffers[src_buf_idx].data[src_row_offset]);
+                    } else {
+                        // Value comes from probe side
+                        size_t probe_col_idx = col_idx - src_side.size();
+                        src_buf_idx = probe_buf_idx;
+                        src_row_offset = probe_row_offset;
+                        output_row.push_back(other_side[probe_col_idx].buffers[src_buf_idx].data[src_row_offset]);
+                    }
+                    }
+                    // Now, push each value to the corresponding column buffer
+                    for (size_t col = 0; col < output_row.size(); ++col) {
+                    if (temp_results[col].buffers.empty() || temp_results[col].buffers.back().data.size() == MAX_PER_BUFFER_ENTRY) {
+                        temp_results[col].buffers.emplace_back();
+                    }
+                    temp_results[col].buffers.back().data.push_back(output_row[col]);
+                    temp_results[col].num_rows++;
+                    }
+                }
+                }
+            }
+            }
+        }
+        results = std::move(temp_results);
+        // // Added std::move to avoid unnecessary copies
+        // for (auto& probe_record : probe_side) {
+        //     const auto& key = probe_record[probe_col];
+        //     if (!key.is_null) {
+        //         if (auto loc = hash_table.find(key.int32_val); loc != hash_table.end()) {
+        //             for (auto build_idx : *loc) {
+        //                 const auto& build_record = build_side[build_idx];
+        //                 const auto* left_record_ptr = build_left ? &build_record : &probe_record;
+        //                 const auto* right_record_ptr = build_left ? &probe_record : &build_record;
+        //                 std::vector<value_t> new_record;
+        //                 new_record.reserve(output_attrs.size());
+        //                 for (auto [col_idx, _] : output_attrs) {
+        //                     if (col_idx < left_record_ptr->size()) {
+        //                         new_record.emplace_back(std::move((*left_record_ptr)[col_idx]));
+        //                     } else {
+        //                         new_record.emplace_back(std::move((*right_record_ptr)[col_idx - left_record_ptr->size()]));
+        //                     }
+        //                 }
+        //                 results.emplace_back(std::move(new_record)); // Use std::move to avoid copying
+        //             }
+        //         }
+        //     }
+        // }
     }
 };
 
@@ -187,69 +249,81 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
             // locate the page that contains the requested row
             auto& pages = column.pages;
             std::vector<buffer_t> buffers;
-            size_t cur_page = 0;
-            while (cur_page < pages.size()) {
-                buffer_t curbuf;
-                size_t rem = MAX_PER_BUFFER_INT32;
-                auto& page = pages[cur_page];
-                const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
-                uint16_t nr = read_u16(page_data);
-                size_t bitmap_size = (nr + 7) / 8;
-                const uint8_t* bitmap_data = reinterpret_cast<const uint8_t*>(page_data) + PAGE_SIZE - bitmap_size;
-                size_t base_offset = 4;
-                //Fill buf with the whole page
-                while (rem > nr && cur_page < pages.size()) {
-                    for (size_t i = 0; i < nr; ++i) {
-                        value_t val;
-                        size_t byte_idx = i / 8;
-                        size_t bit_pos = i % 8;
-                        if (bitmap_data[byte_idx] & (1 << bit_pos)) [[likely]] {
-                            val.int32_val = {read_i32(page_data + base_offset + 4 * nr), 1};
-                            curbuf.data.push_back(val);
-                            continue;
-                        }
-                    }
-                    rem -= nr;
-                    page_data = reinterpret_cast<const uint8_t*>(pages[++cur_page]->data);
-                    nr = read_u16(reinterpret_cast<const uint8_t*>(page->data));
-                }
-                //Fill remainder of buffer with as much is needed from the page
-                for (size_t i = 0; i < rem; ++i) {
+            // JONI implementation commented out
+            // size_t cur_page = 0;
+            // while (cur_page < pages.size()) {
+            //     buffer_t curbuf;
+            //     size_t rem = MAX_PER_BUFFER_ENTRY;
+            //     auto& page = pages[cur_page];
+            //     const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
+            //     uint16_t nr = read_u16(page_data);
+            //     size_t bitmap_size = (nr + 7) / 8;
+            //     const uint8_t* bitmap_data = reinterpret_cast<const uint8_t*>(page_data) + PAGE_SIZE - bitmap_size;
+            //     size_t base_offset = 4;
+            //     //Fill buf with the whole page
+            //     while (rem > nr && cur_page < pages.size()) {
+            //         for (size_t i = 0; i < nr; ++i) {
+            //             value_t val;
+            //             size_t byte_idx = i / 8;
+            //             size_t bit_pos = i % 8;
+            //             if (bitmap_data[byte_idx] & (1 << bit_pos)) [[likely]] {
+            //                 val.int32_val = {read_i32(page_data + base_offset + 4 * nr), 1};
+            //                 curbuf.data.push_back(val);
+            //                 continue;
+            //             }
+            //         }
+            //         rem -= nr;
+            //         page_data = reinterpret_cast<const uint8_t*>(pages[++cur_page]->data);
+            //         nr = read_u16(reinterpret_cast<const uint8_t*>(page->data));
+            //     }
+            //     //Fill remainder of buffer with as much is needed from the page
+            //     for (size_t i = 0; i < rem; ++i) {
                         
                         
                     
-                    buffers.push_back(curbuf); // Bazoume to curbuf sto vector
-                    continue;
-                }
-                buffers.push_back(curbuf);
-                curbuf.values.clear();
-                curbuf.bitmap.clear();
-            }
-            int cur_row = 0;
+            //         buffers.push_back(curbuf); // Bazoume to curbuf sto vector
+            //         continue;
+            //     }
+            //     buffers.push_back(curbuf);
+            //     curbuf.values.clear();
+            //     curbuf.bitmap.clear();
+            // }
+            size_t cur_row = 0;
+            buffer_t curbuf;
             for (auto& page : pages) {
                 const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
                 uint16_t nr = read_u16(page_data);
                 size_t bitmap_size = (nr + 7) / 8;
                 const uint8_t* bitmap_data = reinterpret_cast<const uint8_t*>(page_data) + PAGE_SIZE - bitmap_size;
                 size_t base_offset = 4;
-                for (size_t cur_byte_idx = 0, j = 0; j < nr; ++j, ++cur_row) {
-                    size_t byte_idx = j / 8;
-                    size_t bit_pos = j % 8;
+                for (size_t i = 0; i < nr; ++i, ++cur_row) {
+                    if (curbuf.data.size() == MAX_PER_BUFFER_ENTRY) {
+                        buffers.push_back(curbuf);
+                        curbuf.data.clear();
+                    }
+                    size_t byte_idx = i / 8;
+                    size_t bit_pos = i % 8;
                     value_t val;
                     if (bitmap_data[byte_idx] & (1 << bit_pos)) [[likely]] {
-                        val.int32_val = read_i32(page_data + base_offset + cur_byte_idx);
-                        results[cur_row].push_back(val);
-                        cur_byte_idx += 4;
+                        val.int32_val.val = read_i32(page_data + base_offset + 4 * i);
+                        val.int32_val.status = 1;
+                        curbuf.data.push_back(val);
                         continue;
                     }
-                    results[cur_row].push_back(val);
+                    val.int32_val.status = 0;
+                    curbuf.data.push_back(val);
+                    
                 }
             }
+            std::cout << "Total INT32 rows processed: " << cur_row << std::endl;
+            new_column.buffers = std::move(buffers);
             break;
         }
         case DataType::VARCHAR: {
             auto& pages = column.pages;
             size_t cur_row = 0;
+            std::vector<buffer_t> buffers;
+            buffer_t curbuf;
             for (const auto& [idx, page] : pages | views::enumerate) {
                 const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
                 uint16_t nr = read_u16(page_data);
@@ -266,7 +340,7 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                     val.str_val.col_id = col_id;
                     val.str_val.page_id = idx;
                     val.str_val.offset = 4;
-                    results[cur_row++].push_back(val);
+                    curbuf.data.push_back(val);
                     continue;
                 }
                 else if (nr == 0xfffe) {
@@ -275,6 +349,10 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                 }
                 uint16_t end_offset_idx = 4;
                 for (size_t j = 0; j < nr; ++j, ++cur_row) {
+                    if (curbuf.data.size() == MAX_PER_BUFFER_ENTRY) {
+                        buffers.push_back(curbuf);
+                        curbuf.data.clear();
+                    }
                     size_t byte_idx = j / 8;
                     size_t bit_pos = j % 8;
                     value_t val;
@@ -283,13 +361,19 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                         val.str_val.col_id = col_id;
                         val.str_val.page_id = idx;
                         val.str_val.offset = end_offset_idx;
-                        results[cur_row].push_back(val);
+                        curbuf.data.push_back(val);
                         end_offset_idx += 2;
                         continue;
                     }
-                    results[cur_row].push_back(val);
+                    val.str_val.table_id = table_id;
+                    val.str_val.col_id = col_id;
+                    val.str_val.page_id = idx;
+                    val.str_val.offset = 0xFFFF; // null indicator
+                    curbuf.data.push_back(val);
                 }
             }
+            std::cout << "Total VARCHAR rows processed: " << cur_row << std::endl;
+            new_column.buffers = std::move(buffers);
             break;
         }
     }
@@ -332,8 +416,9 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
         ColumnInserter<std::string> inserter_str{column};
         ColumnInserter<int32_t> inserter_int32{column};
         for (size_t row_idx = 0; row_idx < result.size(); ++row_idx) {
-            const auto& val = result[row_idx][col_idx];
-            if (val.is_null) [[unlikely]] {
+            column_t col = result[col_idx];
+            value_t val = col.buffers[row_idx / MAX_PER_BUFFER_ENTRY].data[row_idx % MAX_PER_BUFFER_ENTRY];
+            if (val.str_val.offset == 0xFFFF || !val.int32_val.status) [[unlikely]] {
                 if (attr_vec[col_idx] == DataType::INT32) {
                     inserter_int32.insert_null();
                 } else if (attr_vec[col_idx] == DataType::VARCHAR) {
@@ -341,7 +426,7 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
                 }
             } else {
                 
-                if (val.is_string) {
+                if (attr_vec[col_idx] == DataType::VARCHAR) {
                     // fetch string from corresponding page
                     auto& table = plan.inputs[val.str_val.table_id];
                     auto& column = table.columns[val.str_val.col_id];
@@ -350,8 +435,7 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
                     size_t offset = val.str_val.offset;
                     std::string str;
                     std::string_view sview{nullptr, 0};
-                    uint16_t nr;
-                    memcpy(&nr, &page_data[0], sizeof(uint16_t));
+                    uint16_t nr = read_u16(page_data);
                     uint16_t page_id = val.str_val.page_id;
                     bool is_long = false;
                     if (nr == 0xffff) [[unlikely]] {
@@ -391,7 +475,8 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
                         inserter_str.insert(sview);
                     }
                 } else {
-                    inserter_int32.insert(val.int32_val);
+                    // column is INT32
+                    inserter_int32.insert(val.int32_val.val);
                 }
             }
         }
