@@ -144,45 +144,45 @@ struct JoinAlgorithm {
         for (auto [probe_buf_idx, probe_buffer] : probe_column.buffers | views::enumerate) {
             size_t probe_row_base = probe_buf_idx * MAX_PER_BUFFER_ENTRY;
             for (size_t probe_row_offset = 0; probe_row_offset < probe_buffer.data.size(); ++probe_row_offset) {
-            const value_t& probe_val = probe_buffer.data[probe_row_offset];
-            int32_t key = probe_val.int32_val.val;
-            if (probe_val.int32_val.status) {
-                auto loc = hash_table.find(key);
-                if (loc != hash_table.end()) {
-                for (auto build_idx : *loc) {
-                    // For each output column, collect the value for this join result row
-                    std::vector<value_t> output_row;
-                    output_row.reserve(output_attrs.size());
-                    for (auto [out_idx, attr] : output_attrs | views::enumerate) {
-                    size_t col_idx = std::get<0>(attr);
-                    DataType dtype = std::get<1>(attr);
-                    const ExecuteResult& src_side = (build_left ? left : right);
-                    const ExecuteResult& other_side = (build_left ? right : left);
-                    size_t src_buf_idx, src_row_offset;
-                    if (col_idx < src_side.size()) {
-                        // Value comes from build side
-                        src_buf_idx = build_idx / MAX_PER_BUFFER_ENTRY;
-                        src_row_offset = build_idx % MAX_PER_BUFFER_ENTRY;
-                        output_row.push_back(src_side[col_idx].buffers[src_buf_idx].data[src_row_offset]);
-                    } else {
-                        // Value comes from probe side
-                        size_t probe_col_idx = col_idx - src_side.size();
-                        src_buf_idx = probe_buf_idx;
-                        src_row_offset = probe_row_offset;
-                        output_row.push_back(other_side[probe_col_idx].buffers[src_buf_idx].data[src_row_offset]);
-                    }
-                    }
-                    // Now, push each value to the corresponding column buffer
-                    for (size_t col = 0; col < output_row.size(); ++col) {
-                    if (temp_results[col].buffers.empty() || temp_results[col].buffers.back().data.size() == MAX_PER_BUFFER_ENTRY) {
-                        temp_results[col].buffers.emplace_back();
-                    }
-                    temp_results[col].buffers.back().data.push_back(output_row[col]);
-                    temp_results[col].num_rows++;
+                const value_t& probe_val = probe_buffer.data[probe_row_offset];
+                int32_t key = probe_val.int32_val.val;
+                if (probe_val.int32_val.status) {
+                    auto loc = hash_table.find(key);
+                    if (loc != hash_table.end()) {
+                        for (auto build_idx : *loc) {
+                            // For each output column, collect the value for this join result row
+                            std::vector<value_t> output_row;
+                            output_row.reserve(output_attrs.size());
+                            for (auto [out_idx, attr] : output_attrs | views::enumerate) {
+                            size_t col_idx = std::get<0>(attr);
+                            DataType dtype = std::get<1>(attr);
+                            const ExecuteResult& src_side = (build_left ? left : right);
+                            const ExecuteResult& other_side = (build_left ? right : left);
+                            size_t src_buf_idx, src_row_offset;
+                            if (col_idx < src_side.size()) {
+                                // Value comes from build side
+                                src_buf_idx = build_idx / MAX_PER_BUFFER_ENTRY;
+                                src_row_offset = build_idx % MAX_PER_BUFFER_ENTRY;
+                                output_row.push_back(src_side[col_idx].buffers[src_buf_idx].data[src_row_offset]);
+                            } else {
+                                // Value comes from probe side
+                                size_t probe_col_idx = col_idx - src_side.size();
+                                src_buf_idx = probe_buf_idx;
+                                src_row_offset = probe_row_offset;
+                                output_row.push_back(other_side[probe_col_idx].buffers[src_buf_idx].data[src_row_offset]);
+                            }
+                            }
+                            // Now, push each value to the corresponding column buffer
+                            for (size_t col = 0; col < output_row.size(); ++col) {
+                            if (temp_results[col].buffers.empty() || temp_results[col].buffers.back().data.size() == MAX_PER_BUFFER_ENTRY) {
+                                temp_results[col].buffers.emplace_back();
+                            }
+                            temp_results[col].buffers.back().data.push_back(output_row[col]);
+                            temp_results[col].num_rows++;
+                            }
+                        }
                     }
                 }
-                }
-            }
             }
         }
         results = std::move(temp_results);
@@ -315,7 +315,7 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                     
                 }
             }
-            std::cout << "Total INT32 rows processed: " << cur_row << std::endl;
+            std::cout << "Total INT32 rows processed for column " << col_id << " of table " << table_id << ": " << cur_row << std::endl;
             new_column.buffers = std::move(buffers);
             break;
         }
@@ -372,7 +372,7 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                     curbuf.data.push_back(val);
                 }
             }
-            std::cout << "Total VARCHAR rows processed: " << cur_row << std::endl;
+            std::cout << "Total VARCHAR rows processed for column " << col_id << " of table " << table_id << ": " << cur_row << std::endl;
             new_column.buffers = std::move(buffers);
             break;
         }
@@ -390,6 +390,8 @@ ExecuteResult execute_scan(const Plan&               plan,
         auto& column = input.columns[col_idx];
         results[col_idx] = column_t(data_type);
         build_column_inserter(table_id, col_idx, column, data_type, results[col_idx]);
+        // print results[col_idx] size
+        std::cout << "Column " << col_idx << " of table " << table_id << " has " << results[col_idx].buffers.size() << " buffers." << std::endl;
     }
     return std::move(results);
 }
