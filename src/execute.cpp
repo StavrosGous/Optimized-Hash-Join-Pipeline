@@ -162,31 +162,31 @@ struct JoinAlgorithm {
                             std::vector<value_t> output_row;
                             output_row.reserve(output_attrs.size());
                             for (auto [out_idx, attr] : output_attrs | views::enumerate) {
-                            size_t col_idx = std::get<0>(attr);
-                            DataType dtype = std::get<1>(attr);
-                            const ExecuteResult& src_side = (build_left ? left : right);
-                            const ExecuteResult& other_side = (build_left ? right : left);
-                            size_t src_buf_idx, src_row_offset;
-                            if (col_idx < src_side.size()) {
-                                // Value comes from build side
-                                src_buf_idx = build_idx / MAX_PER_BUFFER_ENTRY;
-                                src_row_offset = build_idx % MAX_PER_BUFFER_ENTRY;
-                                output_row.push_back(src_side[col_idx].buffers[src_buf_idx].data[src_row_offset]);
-                            } else {
-                                // Value comes from probe side
-                                size_t probe_col_idx = col_idx - src_side.size();
-                                src_buf_idx = probe_buf_idx;
-                                src_row_offset = probe_row_offset;
-                                output_row.push_back(other_side[probe_col_idx].buffers[src_buf_idx].data[src_row_offset]);
-                            }
+                                size_t col_idx = std::get<0>(attr);
+                                DataType dtype = std::get<1>(attr);
+                                const ExecuteResult& src_side = (build_left ? left : right);
+                                const ExecuteResult& other_side = (build_left ? right : left);
+                                size_t src_buf_idx, src_row_offset;
+                                if (col_idx < src_side.size()) {
+                                    // Value comes from build side
+                                    src_buf_idx = build_idx / MAX_PER_BUFFER_ENTRY;
+                                    src_row_offset = build_idx % MAX_PER_BUFFER_ENTRY;
+                                    output_row.push_back(src_side[col_idx].buffers[src_buf_idx].data[src_row_offset]);
+                                } else {
+                                    // Value comes from probe side
+                                    size_t probe_col_idx = col_idx - src_side.size();
+                                    src_buf_idx = probe_buf_idx;
+                                    src_row_offset = probe_row_offset;
+                                    output_row.push_back(other_side[probe_col_idx].buffers[src_buf_idx].data[src_row_offset]);
+                                }
                             }
                             // Now, push each value to the corresponding column buffer
                             for (size_t col = 0; col < output_row.size(); ++col) {
-                            if (temp_results[col].buffers.empty() || temp_results[col].buffers.back().data.size() == MAX_PER_BUFFER_ENTRY) {
-                                temp_results[col].buffers.emplace_back();
-                            }
-                            temp_results[col].buffers.back().data.push_back(output_row[col]);
-                            temp_results[col].num_rows++;
+                                if (temp_results[col].buffers.empty() || temp_results[col].buffers.back().data.size() == MAX_PER_BUFFER_ENTRY) {
+                                    temp_results[col].buffers.emplace_back();
+                                }
+                                temp_results[col].buffers.back().data.push_back(output_row[col]);
+                                temp_results[col].num_rows++;
                             }
                         }
                     }
@@ -298,7 +298,6 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
             //     curbuf.values.clear();
             //     curbuf.bitmap.clear();
             // }
-            size_t cur_row = 0;
             buffer_t curbuf;
             for (auto& page : pages) {
                 const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
@@ -307,7 +306,7 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                 const uint8_t* bitmap_data = reinterpret_cast<const uint8_t*>(page_data) + PAGE_SIZE - bitmap_size;
                 size_t base_offset = 4;
                 // std::cout << "rows in page: " << nr << std::endl;
-                for (size_t i = 0; i < nr; ++i, ++cur_row) {
+                for (size_t i = 0; i < nr; ++i) {
                     if (curbuf.data.size() == MAX_PER_BUFFER_ENTRY) {
                         buffers.push_back(curbuf);
                         curbuf.data.clear();
@@ -315,10 +314,10 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                     size_t byte_idx = i / 8;
                     size_t bit_pos = i % 8;
                     value_t val;
-                    bool is_not_null = bitmap_data[byte_idx] & (1 << bit_pos);
-                    if (!is_not_null) {
-                        // std::cout << "value is null" << std::endl;
-                    }
+                    // bool is_not_null = bitmap_data[byte_idx] & (1 << bit_pos);
+                    // if (!is_not_null) {
+                    //     std::cout << "value is null" << std::endl;
+                    // }
                     if (bitmap_data[byte_idx] & (1 << bit_pos)) [[likely]] {
                         val.int32_val.val = read_i32(page_data + base_offset + 4 * i);
                         val.int32_val.status = 1;
@@ -339,7 +338,6 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
         }
         case DataType::VARCHAR: {
             auto& pages = column.pages;
-            size_t cur_row = 0;
             std::vector<buffer_t> buffers;
             buffer_t curbuf;
             for (const auto& [idx, page] : pages | views::enumerate) {
@@ -365,10 +363,9 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                     // continue to next page
                     continue;
                 }
-                uint16_t end_offset_idx = 4;
                 // std::cout << "rows in page: " << nr << std::endl;
 
-                for (size_t i = 0; i < nr; ++i, ++cur_row) {
+                for (size_t i = 0; i < nr; ++i) {
                     if (curbuf.data.size() == MAX_PER_BUFFER_ENTRY) {
                         buffers.push_back(curbuf);
                         curbuf.data.clear();
@@ -376,17 +373,16 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                     size_t byte_idx = i / 8;
                     size_t bit_pos = i % 8;
                     value_t val;
-                    bool is_not_null = bitmap_data[byte_idx] & (1 << bit_pos);
-                    if (!is_not_null) {
-                        // std::cout << "value is null" << std::endl;
-                    }
+                    // bool is_not_null = bitmap_data[byte_idx] & (1 << bit_pos);
+                    // if (!is_not_null) {
+                    //     std::cout << "value is null" << std::endl;
+                    // }
                     if (bitmap_data[byte_idx] & (1 << bit_pos)) {
                         val.str_val.table_id = table_id;
                         val.str_val.col_id = col_id;
                         val.str_val.page_id = idx;
-                        val.str_val.offset = end_offset_idx;
+                        val.str_val.offset = 4 + 2 * i;
                         curbuf.data.push_back(val);
-                        end_offset_idx += 2;
                         continue;
                     }
                     val.str_val.table_id = table_id;
