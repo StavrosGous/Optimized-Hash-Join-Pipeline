@@ -112,36 +112,36 @@ struct JoinAlgorithm {
         const size_t probe_col = build_left ? right_col : left_col;
 
         hashmap_type hash_table(build_side.size() * 1.6);
-        std::cout << "Starting build phase..." << std::endl;
+        // std::cout << "Starting build phase..." << std::endl;
         ExecuteResult temp_results;
         temp_results.resize(output_attrs.size());
 
-        std::cout << "trying to fetch build column with idx " << build_col << " build side size: " << build_side.size() << std::endl;
+        // std::cout << "trying to fetch build column with idx " << build_col << " build side size: " << build_side.size() << std::endl;
         const auto& build_column = build_side[build_col];
 
-        std::cout << "trying to fetch probe column with idx " << probe_col << " probe side size: " << probe_side.size() << std::endl;
+        // std::cout << "trying to fetch probe column with idx " << probe_col << " probe side size: " << probe_side.size() << std::endl;
         const auto& probe_column = probe_side[probe_col];
 
         // Fail-safe: if build or probe column is empty, return empty columns
         if (build_column.buffers.empty() || probe_column.buffers.empty()) {
-            std::cout << "[HashJoin] Build or probe column is empty. Returning empty join result." << std::endl;
+            // std::cout << "[HashJoin] Build or probe column is empty. Returning empty join result." << std::endl;
             results.clear();
             results.resize(output_attrs.size());
             return;
         }
 
-        std::cout << "build column buffers size: " << build_column.buffers.size() << std::endl;
+        // std::cout << "build column buffers size: " << build_column.buffers.size() << std::endl;
         for (auto [idx, buffer] : build_column.buffers | views::enumerate) {
-            std::cout << "Processing build buffer index: " << idx << std::endl;
+            // std::cout << "Processing build buffer index: " << idx << std::endl;
             for (value_t val : buffer.data) {
                 int32_t key = val.int32_val.val;
-                std::cout << "Building key: " << key << " at buffer index: " << idx << std::endl;
+                // std::cout << "Building key: " << key << " at buffer index: " << idx << std::endl;
                 if (val.int32_val.status) {
                     if (auto loc = hash_table.find(key); loc == hash_table.end()) {
                         hash_table.emplace(key, std::vector<size_t>{});
                     } else {
                         auto row_idx = idx * MAX_PER_BUFFER_ENTRY + (&val - (&buffer.data[0])) / sizeof(value_t);
-                        std::cout << "Row idx:" << row_idx << std::endl;
+                        // std::cout << "Row idx:" << row_idx << std::endl;
                         loc->push_back(row_idx);
                     }
                 }
@@ -230,7 +230,9 @@ ExecuteResult execute_hash_join(const Plan&          plan,
     auto&                          left_attr_vec  = left_node.output_attrs;
     auto&                          right_attr_vec = right_node.output_attrs;
     auto                           left        = execute_impl(plan, left_idx);
+    // std::cout << "Left side has " << left.size() << " columns." << std::endl;
     auto                           right       = execute_impl(plan, right_idx);
+    // std::cout << "Right side has " << right.size() << " columns." << std::endl;
     std::vector<column_t> results;
     // Heuristic reservation: helps reduce reallocations for result storage
     results.reserve(std::min(left.size() + right.size(), static_cast<size_t>(left.size() * 2)));
@@ -243,7 +245,7 @@ ExecuteResult execute_hash_join(const Plan&          plan,
         .right_col                           = join.right_attr,
         .output_attrs                        = output_attrs};
     join_algorithm.run<int32_t>();
-
+    // std::cout << "[HashJoin] Completed. Result has " << results.size() << " columns." << std::endl;
     return std::move(results); // Use std::move to avoid copying
 }
 
@@ -304,7 +306,7 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                 size_t bitmap_size = (nr + 7) / 8;
                 const uint8_t* bitmap_data = reinterpret_cast<const uint8_t*>(page_data) + PAGE_SIZE - bitmap_size;
                 size_t base_offset = 4;
-                std::cout << "rows in page: " << nr << std::endl;
+                // std::cout << "rows in page: " << nr << std::endl;
                 for (size_t i = 0; i < nr; ++i, ++cur_row) {
                     if (curbuf.data.size() == MAX_PER_BUFFER_ENTRY) {
                         buffers.push_back(curbuf);
@@ -315,7 +317,7 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                     value_t val;
                     bool is_not_null = bitmap_data[byte_idx] & (1 << bit_pos);
                     if (!is_not_null) {
-                        std::cout << "value is null" << std::endl;
+                        // std::cout << "value is null" << std::endl;
                     }
                     if (bitmap_data[byte_idx] & (1 << bit_pos)) [[likely]] {
                         val.int32_val.val = read_i32(page_data + base_offset + 4 * i);
@@ -331,7 +333,7 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
             if (!curbuf.data.empty()) {
                 buffers.push_back(curbuf);
             }
-            std::cout << "Total INT32 rows processed for column " << col_id << " of table " << table_id << ": " << cur_row << " and filled " << curbuf.data.size() << " entries." << std::endl;
+            // std::cout << "Total INT32 rows processed for column " << col_id << " of table " << table_id << ": " << cur_row << " and filled " << curbuf.data.size() << " entries." << std::endl;
             new_column.buffers = std::move(buffers);
             break;
         }
@@ -364,7 +366,7 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                     continue;
                 }
                 uint16_t end_offset_idx = 4;
-                std::cout << "rows in page: " << nr << std::endl;
+                // std::cout << "rows in page: " << nr << std::endl;
 
                 for (size_t i = 0; i < nr; ++i, ++cur_row) {
                     if (curbuf.data.size() == MAX_PER_BUFFER_ENTRY) {
@@ -376,7 +378,7 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                     value_t val;
                     bool is_not_null = bitmap_data[byte_idx] & (1 << bit_pos);
                     if (!is_not_null) {
-                        std::cout << "value is null" << std::endl;
+                        // std::cout << "value is null" << std::endl;
                     }
                     if (bitmap_data[byte_idx] & (1 << bit_pos)) {
                         val.str_val.table_id = table_id;
@@ -394,7 +396,7 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                     curbuf.data.push_back(val);
                 }
             }
-            std::cout << "Total VARCHAR rows processed for column " << col_id << " of table " << table_id << ": " << cur_row << " and filled " << curbuf.data.size() << " entries." << std::endl;
+            // std::cout << "Total VARCHAR rows processed for column " << col_id << " of table " << table_id << ": " << cur_row << " and filled " << curbuf.data.size() << " entries." << std::endl;
             new_column.buffers = std::move(buffers);
             break;
         }
@@ -413,7 +415,7 @@ ExecuteResult execute_scan(const Plan&               plan,
         results[col_idx] = column_t(data_type);
         build_column_inserter(table_id, col_idx, column, data_type, results[col_idx]);
         // print results[col_idx] size
-        std::cout << "Column " << col_idx << " of table " << table_id << " has " << results[col_idx].buffers.size() << " buffers." << std::endl;
+        // std::cout << "Column " << col_idx << " of table " << table_id << " has " << results[col_idx].buffers.size() << " buffers." << std::endl;
     }
     return std::move(results);
 }
@@ -435,72 +437,87 @@ ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
 ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& result, const std::vector<DataType>& attr_vec) {
     ColumnarTable table;
     table.num_rows = result.size();
+    // std::cout << "[Materialize] Number of rows: " << table.num_rows << std::endl;
     for (size_t col_idx = 0; col_idx < attr_vec.size(); ++col_idx) {
         Column column(attr_vec[col_idx]);
         ColumnInserter<std::string> inserter_str{column};
         ColumnInserter<int32_t> inserter_int32{column};
-        for (size_t row_idx = 0; row_idx < result.size(); ++row_idx) {
-            column_t col = result[col_idx];
-            value_t val = col.buffers[row_idx / MAX_PER_BUFFER_ENTRY].data[row_idx % MAX_PER_BUFFER_ENTRY];
-            if (val.str_val.offset == 0xFFFF || !val.int32_val.status) [[unlikely]] {
+        // std::cout << "[Materialize] Materializing column " << col_idx << " of type " << static_cast<int>(attr_vec[col_idx]) << std::endl;
+        column_t col = result[col_idx];
+        if (col.buffers.empty()) {
+            // std::cout << "[Materialize] Column " << col_idx << " is empty. Inserting nulls for all rows." << std::endl;
+            for (size_t row_idx = 0; row_idx < result.size(); ++row_idx) {
                 if (attr_vec[col_idx] == DataType::INT32) {
                     inserter_int32.insert_null();
                 } else if (attr_vec[col_idx] == DataType::VARCHAR) {
                     inserter_str.insert_null();
                 }
-            } else {
-                
-                if (attr_vec[col_idx] == DataType::VARCHAR) {
-                    // fetch string from corresponding page
-                    auto& table = plan.inputs[val.str_val.table_id];
-                    auto& column = table.columns[val.str_val.col_id];
-                    Page* page = column.pages[val.str_val.page_id];
-                    const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
-                    size_t offset = val.str_val.offset;
-                    std::string str;
-                    std::string_view sview{nullptr, 0};
-                    uint16_t nr = read_u16(page_data);
-                    uint16_t page_id = val.str_val.page_id;
-                    bool is_long = false;
-                    if (nr == 0xffff) [[unlikely]] {
-                        uint16_t nchars = read_u16(page_data + 2);
-                        str.assign(reinterpret_cast<const char*>(page_data + 4), nchars);
-                        page_id++;
-                        page = column.pages[page_id];
-                        page_data = reinterpret_cast<const uint8_t*>(page->data);
-                        nr = read_u16(page_data);
-                        is_long = true;
-                        while (nr == 0xfffe) [[likely]] {
-                            nchars = read_u16(page_data + 2);
-                            str.append(reinterpret_cast<const char*>(page_data + 4), nchars);
+            }
+        } else {
+            for (size_t row_idx = 0; row_idx < result.size(); ++row_idx) {
+                // std::cout << "[Materialize] Processing row " << row_idx << " of column " << col_idx << std::endl;
+                // std::cout << "Column has " << col.buffers.size() << " buffers." << std::endl;
+                value_t val = col.buffers[row_idx / MAX_PER_BUFFER_ENTRY].data[row_idx % MAX_PER_BUFFER_ENTRY];
+                // std::cout << "Fetched value for row " << row_idx << ": " << (attr_vec[col_idx] == DataType::INT32 ? std::to_string(val.int32_val.val) : "string_struct") << std::endl;
+                if (val.str_val.offset == 0xFFFF || !val.int32_val.status) [[unlikely]] {
+                    if (attr_vec[col_idx] == DataType::INT32) {
+                        inserter_int32.insert_null();
+                    } else if (attr_vec[col_idx] == DataType::VARCHAR) {
+                        inserter_str.insert_null();
+                    }
+                } else {
+                    if (attr_vec[col_idx] == DataType::VARCHAR) {
+                        // fetch string from corresponding page
+                        auto& table = plan.inputs[val.str_val.table_id];
+                        auto& column = table.columns[val.str_val.col_id];
+                        Page* page = column.pages[val.str_val.page_id];
+                        const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
+                        size_t offset = val.str_val.offset;
+                        std::string str;
+                        std::string_view sview{nullptr, 0};
+                        uint16_t nr = read_u16(page_data);
+                        uint16_t page_id = val.str_val.page_id;
+                        bool is_long = false;
+                        if (nr == 0xffff) [[unlikely]] {
+                            uint16_t nchars = read_u16(page_data + 2);
+                            str.assign(reinterpret_cast<const char*>(page_data + 4), nchars);
                             page_id++;
                             page = column.pages[page_id];
                             page_data = reinterpret_cast<const uint8_t*>(page->data);
                             nr = read_u16(page_data);
+                            is_long = true;
+                            while (nr == 0xfffe) [[likely]] {
+                                nchars = read_u16(page_data + 2);
+                                str.append(reinterpret_cast<const char*>(page_data + 4), nchars);
+                                page_id++;
+                                page = column.pages[page_id];
+                                page_data = reinterpret_cast<const uint8_t*>(page->data);
+                                nr = read_u16(page_data);
+                            }
                         }
-                    }
-                    if (!is_long) [[likely]]{
-                        uint16_t end_offset_pos = offset;
-                        uint16_t end_offset;
-                        uint16_t start_offset;
-                        uint16_t base_offset = 4 + nr * 2;
-                        if (end_offset_pos > 4) {
-                            end_offset = read_u16(page_data + end_offset_pos) + base_offset;
-                            start_offset = read_u16(page_data + end_offset_pos - 2) + base_offset;
+                        if (!is_long) [[likely]]{
+                            uint16_t end_offset_pos = offset;
+                            uint16_t end_offset;
+                            uint16_t start_offset;
+                            uint16_t base_offset = 4 + nr * 2;
+                            if (end_offset_pos > 4) {
+                                end_offset = read_u16(page_data + end_offset_pos) + base_offset;
+                                start_offset = read_u16(page_data + end_offset_pos - 2) + base_offset;
+                            } else {
+                                start_offset = base_offset;
+                                end_offset = read_u16(page_data + 4) + base_offset;
+                            }
+                            sview = std::string_view(reinterpret_cast<const char*>(page_data + start_offset), end_offset - start_offset);
+                        }
+                        if (is_long) {
+                            inserter_str.insert(str);
                         } else {
-                            start_offset = base_offset;
-                            end_offset = read_u16(page_data + 4) + base_offset;
+                            inserter_str.insert(sview);
                         }
-                        sview = std::string_view(reinterpret_cast<const char*>(page_data + start_offset), end_offset - start_offset);
-                    }
-                    if (is_long) {
-                        inserter_str.insert(str);
                     } else {
-                        inserter_str.insert(sview);
+                        // column is INT32
+                        inserter_int32.insert(val.int32_val.val);
                     }
-                } else {
-                    // column is INT32
-                    inserter_int32.insert(val.int32_val.val);
                 }
             }
         }
@@ -514,11 +531,13 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
 ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     namespace views = ranges::views;
     auto ret        = execute_impl(plan, plan.root);
+    // std::cout << "[Execute] Completed execution. Result has " << ret.size() << " columns." << std::endl;
     std::vector<DataType> ret_attr_vec;
     ret_attr_vec.reserve(plan.nodes[plan.root].output_attrs.size());
     for (const auto& attr : plan.nodes[plan.root].output_attrs) {
         ret_attr_vec.push_back(std::get<1>(attr));
     }
+    // std::cout << "[Execute] Materializing columnar table..." << std::endl;
     return materialize_columnar_table(plan, ret, ret_attr_vec);
 }
 
