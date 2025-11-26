@@ -121,21 +121,23 @@ struct JoinAlgorithm {
         ExecuteResult temp_results;
         temp_results.resize(output_attrs.size());
 
-        // std::cout << "trying to fetch build column with idx " << build_col << " build side size: " << build_side.size() << std::endl;
+        std::cout << "trying to fetch build column with idx " << build_col << " build side size: " << build_side.size() << std::endl;
         const auto& build_column = build_side[build_col];
 
-        // std::cout << "trying to fetch probe column with idx " << probe_col << " probe side size: " << probe_side.size() << std::endl;
+        std::cout << "trying to fetch probe column with idx " << probe_col << " probe side size: " << probe_side.size() << std::endl;
         const auto& probe_column = probe_side[probe_col];
 
+        std::cout << "Build column buffers size: " << build_column.buffers.size() << std::endl;
+        std::cout << "Probe column buffers size: " << probe_column.buffers.size() << std::endl;
         // Fail-safe: if build or probe column is empty, return empty columns
         if (build_column.buffers.empty() || probe_column.buffers.empty()) {
-            // std::cout << "[HashJoin] Build or probe column is empty. Returning empty join result." << std::endl;
+            std::cout << "[HashJoin] Build or probe column is empty. Returning empty join result." << std::endl;
             results.clear();
             results.resize(output_attrs.size());
             return;
         }
 
-        // std::cout << "build column buffers size: " << build_column.buffers.size() << std::endl;
+        std::cout << "build column buffers size: " << build_column.buffers.size() << std::endl;
         for (auto [idx, buffer] : build_column.buffers | views::enumerate) {
             // std::cout << "Processing build buffer index: " << idx << std::endl;
             for (size_t i = 0; i < buffer.data.size(); ++i) {
@@ -145,28 +147,31 @@ struct JoinAlgorithm {
                 if (int32_val.status) {
                     std::cout << "[HashJoin] Building key: " << key << " at buffer index: " << idx << std::endl;
                     if (auto loc = hash_table.find(key); loc == hash_table.end()) {
-                        hash_table.emplace(key, std::vector<size_t>{});
+                        std::cout << "[HashJoin] Inserting new key into hash table: " << key << std::endl;
+                        hash_table.emplace(key, std::vector<size_t>{idx * MAX_PER_BUFFER_ENTRY + i});
                     } else {
                         auto row_idx = idx * MAX_PER_BUFFER_ENTRY + i;
-                        // std::cout << "Row idx:" << row_idx << std::endl;
+                        std::cout << "[HashJoin] Adding row index " << row_idx << " to existing key: " << key << std::endl;
                         loc->push_back(row_idx);
                     }
                 }
             }
         }
-        // std::cout << "Probe phase starting with size " << probe_column.buffers.size() << std::endl;      
+        std::cout << "Probe phase starting with size " << probe_column.buffers.size() << std::endl;      
         // For each probe row, check for matches and build output buffers row-wise
         for (auto [probe_idx, probe_buffer] : probe_column.buffers | views::enumerate) {
             for (size_t i = 0; i < probe_buffer.data.size(); ++i) {
                 value_t probe_val = probe_buffer.data[i];
                 int32_t key = probe_val.int32_val.val;
-                // std::cout << "Key being probed: " << key << (probe_val.int32_val.status ? " is not null" : " is null") << std::endl;
+                std::cout << "Key being probed: " << key << (probe_val.int32_val.status ? " is not null" : " is null") << std::endl;
                 if (probe_val.int32_val.status) {
                     if (auto loc = hash_table.find(key); loc != hash_table.end()) {
+                        std::cout << "[HashJoin] Key found in hash table: " << key << std::endl;
+                        std::cout << "[HashJoin] Number of matching build rows: " << loc->size() << std::endl;
                         for (auto build_idx : *loc) {
                             std::vector<value_t> output_row;
                             output_row.reserve(output_attrs.size());
-                            // std::cout << "[HashJoin] Match found for key: " << key << " Build idx: " << build_idx << " Probe idx: " << probe_idx << std::endl;
+                            std::cout << "[HashJoin] Match found for key: " << key << " Build idx: " << build_idx << " Probe idx: " << probe_idx << std::endl;
                             for (auto [out_idx, attr] : output_attrs | views::enumerate) {
                                 auto col_idx = std::get<0>(attr);
                                 DataType dtype = std::get<1>(attr);
@@ -174,11 +179,13 @@ struct JoinAlgorithm {
                                 if (col_idx < build_side.size()) {
                                     columnar_buf_idx = build_idx / MAX_PER_BUFFER_ENTRY;
                                     columnar_row_offset = build_idx % MAX_PER_BUFFER_ENTRY;
+                                    std::cout << "Push back " << build_side[col_idx].buffers[columnar_buf_idx].data[columnar_row_offset].int32_val.val << std::endl;
                                     output_row.push_back(build_side[col_idx].buffers[columnar_buf_idx].data[columnar_row_offset]);
                                 } else {
                                     size_t probe_col_idx = col_idx - build_side.size();
                                     columnar_buf_idx = probe_idx;
                                     columnar_row_offset = i;
+                                    std::cout << "Push back " << probe_side[probe_col_idx].buffers[columnar_buf_idx].data[columnar_row_offset].int32_val.val << std::endl;
                                     output_row.push_back(probe_side[probe_col_idx].buffers[columnar_buf_idx].data[columnar_row_offset]);
                                 }
                             }
@@ -186,6 +193,7 @@ struct JoinAlgorithm {
                                 if (temp_results[col].buffers.empty() || temp_results[col].buffers.back().data.size() == MAX_PER_BUFFER_ENTRY) {
                                     temp_results[col].buffers.emplace_back();
                                 }
+                                std::cout << "Appending value to result column " << col << ": " << output_row[col].int32_val.val << std::endl;
                                 temp_results[col].buffers.back().data.push_back(output_row[col]);
                                 temp_results[col].num_rows++;
                             }
@@ -195,7 +203,16 @@ struct JoinAlgorithm {
             }
         }
 
-        
+        //print result table
+        for (const auto& column : temp_results) {
+            std::cout << "Result column with " << column.num_rows << " rows." << std::endl;
+            for (const auto& buffer : column.buffers) {
+                for (const auto& val : buffer.data) {
+                    std::cout << val.int32_val.val << " ";
+                }
+                std::cout << std::endl;
+            }
+        }
         results = std::move(temp_results);
         // Added std::move to avoid unnecessary copies
         // for (auto& probe_record : probe_side) {
@@ -233,9 +250,9 @@ ExecuteResult execute_hash_join(const Plan&          plan,
     auto&                          left_attr_vec  = left_node.output_attrs;
     auto&                          right_attr_vec = right_node.output_attrs;
     auto                           left        = execute_impl(plan, left_idx);
-    // std::cout << "Left side has " << left.size() << " columns." << std::endl;
+    std::cout << "Left side has " << left.size() << " columns." << std::endl;
     auto                           right       = execute_impl(plan, right_idx);
-    // std::cout << "Right side has " << right.size() << " columns." << std::endl;
+    std::cout << "Right side has " << right.size() << " columns." << std::endl;
     std::vector<column_t> results;
     // Heuristic reservation: helps reduce reallocations for result storage
     results.reserve(std::min(left.size() + right.size(), static_cast<size_t>(left.size() * 2)));
@@ -248,7 +265,7 @@ ExecuteResult execute_hash_join(const Plan&          plan,
         .right_col                           = join.right_attr,
         .output_attrs                        = output_attrs};
     join_algorithm.run<int32_t>();
-    // std::cout << "[HashJoin] Completed. Result has " << results.size() << " columns." << std::endl;
+    std::cout << "[HashJoin] Completed. Result has " << results.size() << " columns." << std::endl;
     return std::move(results); // Use std::move to avoid copying
 }
 
@@ -326,18 +343,17 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                         wrapper_val.int32_val.val = read_i32(page_data + base_offset + 4 * (cur_nv_row++));
                         wrapper_val.int32_val.status = 1;
                         curbuf.data.push_back(std::move(wrapper_val));
-                        // std::cout << "Read INT32 value: " << wrapper_val.int32_val.val << std::endl;
+                        std::cout << "Read INT32 value: " << wrapper_val.int32_val.val << std::endl;
                         continue;
                     }
                     wrapper_val.int32_val.status = 0;
                     curbuf.data.push_back(std::move(wrapper_val));
-                    // std::cout << "Read INT32 value: " << wrapper_val.int32_val.val << std::endl;
+                    std::cout << "Read INT32 value: " << wrapper_val.int32_val.val << std::endl;
                 }
             }
             if (!curbuf.data.empty()) {
                 buffers.push_back(std::move(curbuf));
             }
-            // std::cout << "Total INT32 rows processed for column " << col_id << " of table " << table_id << ": " << cur_row << " and filled " << curbuf.data.size() << " entries." << std::endl;
             new_column.buffers = std::move(buffers);
             break;
         }
@@ -346,9 +362,6 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
             for (const auto& [idx, page] : pages | views::enumerate) {
                 const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
                 uint16_t nr = read_u16(page_data);
-
-                // uint16_t nchars;
-                // memcpy(&nchars, &page_data[2], sizeof(uint16_t));
 
                 size_t bitmap_size = (nr + 7) / 8;
                 const uint8_t* bitmap_data = reinterpret_cast<const uint8_t*>(page->data) + PAGE_SIZE - bitmap_size;
@@ -360,14 +373,12 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                     val.str_val.page_id = idx;
                     val.str_val.offset = 4;
                     curbuf.data.push_back(val);
-                    // std::cout << "Read long VARCHAR value at page " << idx << " offset " << 4 << std::endl;
                     continue;
                 }
                 else if (nr == 0xfffe) {
                     // continue to next page
                     continue;
                 }
-                // std::cout << "rows in page: " << nr << std::endl;
                 size_t cur_nv_row = 0;
                 for (size_t i = 0; i < nr; ++i) {
                     if (curbuf.data.size() == MAX_PER_BUFFER_ENTRY) {
@@ -398,7 +409,6 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                     // std::cout << "Read null VARCHAR value at page " << idx << std::endl;
                 }
             }
-            // std::cout << "Total VARCHAR rows processed for column " << col_id << " of table " << table_id << ": " << cur_row << " and filled " << curbuf.data.size() << " entries." << std::endl;
             new_column.buffers = std::move(buffers);
             break;
         }
@@ -430,8 +440,10 @@ ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
         [&](const auto& value) {
             using T = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<T, JoinNode>) {
+                std::cout << "Executing hash join node..." << std::endl;
                 return execute_hash_join(plan, value, node.output_attrs);
             } else {
+                std::cout << "Executing scan node..." << std::endl;
                 return execute_scan(plan, value, node.output_attrs);
             }
         },
@@ -440,8 +452,8 @@ ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
 
 ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& result, const std::vector<DataType>& attr_vec) {
     ColumnarTable table;
-    table.num_rows = result.size();
-    // std::cout << "[Materialize] Number of rows: " << table.num_rows << std::endl;
+    table.num_rows = result.empty() ? 0 : result[0].num_rows;
+    std::cout << "[Materialize] Number of rows: " << table.num_rows << std::endl;
     for (size_t col_idx = 0; col_idx < attr_vec.size(); ++col_idx) {
         Column column(attr_vec[col_idx]);
         ColumnInserter<std::string> inserter_str{column};
@@ -451,7 +463,7 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
         // std::cout << "[Materialize] Column has " << col.buffers.size() << " buffers." << std::endl;
         if (col.buffers.empty()) {
             // std::cout << "[Materialize] Column " << col_idx << " is empty. Inserting nulls for all rows." << std::endl;
-            for (size_t row_idx = 0; row_idx < result.size(); ++row_idx) {
+            for (size_t row_idx = 0; row_idx < table.num_rows; ++row_idx) {
                 if (attr_vec[col_idx] == DataType::INT32) {
                     inserter_int32.insert_null();
                 } else if (attr_vec[col_idx] == DataType::VARCHAR) {
@@ -459,11 +471,13 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
                 }
             }
         } else {
-            for (size_t row_idx = 0; row_idx < result.size(); ++row_idx) {
+            std::cout << "[Materialize] Column " << col_idx << " has " << col.num_rows << " rows." << std::endl;
+            std::cout << "Results size: " << table.num_rows << std::endl;
+            for (size_t row_idx = 0; row_idx < table.num_rows; ++row_idx) {
                 // std::cout << "[Materialize] Processing row " << row_idx << " of column " << col_idx << std::endl;
                 // std::cout << "Column has " << col.buffers.size() << " buffers." << std::endl;
                 value_t val = col.get_value(row_idx);
-                // std::cout << "Fetched value for row " << row_idx << ": " << (attr_vec[col_idx] == DataType::INT32 ? std::to_string(val.int32_val.val) : "string_struct") << std::endl;
+                std::cout << "Fetched value for row " << row_idx << ": " << (attr_vec[col_idx] == DataType::INT32 ? std::to_string(val.int32_val.val) : "string_struct") << std::endl;
                 if (val.str_val.offset == 0xFFFF || !val.int32_val.status) [[unlikely]] {
                     if (attr_vec[col_idx] == DataType::INT32) {
                         inserter_int32.insert_null();
@@ -523,7 +537,7 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
                         }
                     } else {
                         // column is INT32
-                        // std::cout << "[Materialize] INT32 value materialized: " << val.int32_val.val << std::endl;
+                        std::cout << "[Materialize] INT32 value materialized: " << val.int32_val.val << std::endl;
                         inserter_int32.insert(val.int32_val.val);
                     }
                 }
@@ -546,7 +560,9 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
         ret_attr_vec.push_back(std::get<1>(attr));
     }
     // std::cout << "[Execute] Materializing columnar table..." << std::endl;
-    return materialize_columnar_table(plan, ret, ret_attr_vec);
+    ColumnarTable table = materialize_columnar_table(plan, ret, ret_attr_vec);
+    std::cout << "[Execute] Materialization completed. Resulting table has " << table.columns.size() << " columns and " << table.num_rows << " rows." << std::endl;
+    return table;
 }
 
 void* build_context() {
