@@ -51,7 +51,7 @@ struct column_t {
 
     column_t() : num_rows(0), type(DataType::INT32) {}
     column_t(const DataType& dt) : num_rows(0), type(dt) {}
-    inline value_t get_value(size_t row_idx) {
+    inline value_t get_value(size_t row_idx) const {
         size_t buf_idx = row_idx / MAX_PER_BUFFER_ENTRY;
         size_t buf_offset = (row_idx % MAX_PER_BUFFER_ENTRY);
         return buffers[buf_idx].data[buf_offset];
@@ -112,7 +112,6 @@ struct JoinAlgorithm {
             results.clear();
             return;
         }
-        std::cout << "before" << std::endl;
         for (auto [idx, buffer] : build_column.buffers | views::enumerate) {
             for (size_t i = 0; i < buffer.data.size(); ++i) {
                 value_t wrapper_val = buffer.data[i];
@@ -168,6 +167,7 @@ struct JoinAlgorithm {
             }
         }
         results = std::move(temp_results);
+        // std::cout << ((results.empty() ? 0 : results[0].num_rows)) << std::endl;
     }
 };
 
@@ -233,7 +233,7 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                         curbuf.data.push_back(std::move(wrapper_val));
                         if (curbuf.data.size() == MAX_PER_BUFFER_ENTRY) {
                             total_rows += MAX_PER_BUFFER_ENTRY;
-                            buffers.push_back(std::move(curbuf));
+                            buffers.push_back(curbuf);
                             curbuf.data.clear();
                         }
                         continue;
@@ -242,14 +242,14 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                     curbuf.data.push_back(std::move(wrapper_val));
                     if (curbuf.data.size() == MAX_PER_BUFFER_ENTRY) {
                         total_rows += MAX_PER_BUFFER_ENTRY;
-                        buffers.push_back(std::move(curbuf));
+                        buffers.push_back(curbuf);
                         curbuf.data.clear();
                     }
                 }
             }
             if (!curbuf.data.empty()) {
                 total_rows += curbuf.data.size();
-                buffers.push_back(std::move(curbuf));
+                buffers.push_back(curbuf);
             }
             new_column.buffers = std::move(buffers);
             new_column.num_rows = total_rows;
@@ -311,7 +311,7 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
             }
             if (!curbuf.data.empty()) {
                 total_rows += curbuf.data.size();
-                buffers.push_back(std::move(curbuf));
+                buffers.push_back(curbuf);
             }
             new_column.buffers = std::move(buffers);
             new_column.num_rows = total_rows;
@@ -340,21 +340,27 @@ ExecuteResult execute_scan(const Plan&               plan,
 
 ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
     auto& node = plan.nodes[node_idx];
-    return std::move(std::visit(
+    auto ret = (std::visit(
         [&](const auto& value) {
             using T = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<T, JoinNode>) {
-                return execute_hash_join(plan, value, node.output_attrs);
+                auto ret  = execute_hash_join(plan, value, node.output_attrs);
+                return std::move(ret);
             } else {
-                return execute_scan(plan, value, node.output_attrs);
+                auto ret = execute_scan(plan, value, node.output_attrs);
+                return std::move(ret);
             }
         },
         node.data));
+    std::cout << "Node " << node_idx << " rows: "
+              << ((ret.empty() ? 0 : ret[0].num_rows)) << std::endl;
+    return ret;
 }
 
 ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& result, const std::vector<DataType>& attr_vec) {
     ColumnarTable table;
     table.num_rows = result.empty() ? 0 : result[0].num_rows;
+    std::cout << table.num_rows << std::endl; // ONLY PRINTS 0 (PROBLEM?)
     std::cout << "before" << std::endl;
     for (size_t col_idx = 0; col_idx < attr_vec.size(); ++col_idx) {
         Column column(attr_vec[col_idx]);
@@ -444,6 +450,7 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
 ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     namespace views = ranges::views;
     auto ret        = execute_impl(plan, plan.root);
+    std::cout << ((ret.empty() ? 0 : ret[0].num_rows)) << std::endl;
     std::vector<DataType> ret_attr_vec;
     ret_attr_vec.reserve(plan.nodes[plan.root].output_attrs.size());
     for (const auto& attr : plan.nodes[plan.root].output_attrs) {
