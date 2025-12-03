@@ -164,7 +164,7 @@ struct JoinAlgorithm {
                                 if (res_col.buffers.empty() || (res_col.buffers.back().data.size() == MAX_PER_BUFFER_ENTRY)) {
                                     res_col.buffers.emplace_back();
                                 }
-                                res_col.buffers.back().data.push_back(val);
+                                res_col.buffers.back().data.push_back(std::move(val));
                                 res_col.num_rows++;
                             }
                         }
@@ -211,7 +211,6 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
     auto& pages = column.pages;
     std::vector<buffer_t> buffers;
     buffer_t curbuf;
-    size_t total_rows = 0; // do we need this?
     switch (data_type) {
         case DataType::INT32: {
             for (auto& page : pages) {
@@ -236,29 +235,17 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                     if (bitmap_data[byte_idx] & (1 << bit_pos)) [[likely]] {
                         wrapper_val.int32_val.val = read_i32(page_data + 4 + 4 * (cur_nv_row++));
                         wrapper_val.int32_val.status = 1;
-                        curbuf.data.push_back(std::move(wrapper_val));
-                        if (curbuf.data.size() == MAX_PER_BUFFER_ENTRY) {
-                            total_rows += MAX_PER_BUFFER_ENTRY;
-                            buffers.push_back(curbuf);
-                            curbuf.data.clear();
-                        }
-                        continue;
                     }
-                    wrapper_val.int32_val.status = 0;
+                    else {
+                        wrapper_val.int32_val.status = 0;
+                    }
                     curbuf.data.push_back(std::move(wrapper_val));
                     if (curbuf.data.size() == MAX_PER_BUFFER_ENTRY) {
-                        total_rows += MAX_PER_BUFFER_ENTRY;
-                        buffers.push_back(curbuf);
+                        buffers.push_back(std::move(curbuf));
                         curbuf.data.clear();
                     }
                 }
             }
-            if (!curbuf.data.empty()) {
-                total_rows += curbuf.data.size();
-                buffers.push_back(curbuf);
-            }
-            new_column.buffers = std::move(buffers);
-            new_column.num_rows = total_rows;
             break;
         }
         case DataType::VARCHAR: {
@@ -273,11 +260,10 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                     val.str_val.col_id = col_id;
                     val.str_val.page_id = idx;
                     val.str_val.offset = 4;
-                    curbuf.data.push_back(val);
+                    curbuf.data.push_back(std::move(val));
                     if (curbuf.data.size() == MAX_PER_BUFFER_ENTRY) {
-                        buffers.push_back(curbuf);
+                        buffers.push_back(std::move(curbuf));
                         curbuf.data.clear();
-                        total_rows += MAX_PER_BUFFER_ENTRY;
                     }
                     continue;
                 }
@@ -295,40 +281,25 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                     size_t byte_idx = i / 8;
                     size_t bit_pos = i % 8;
                     value_t val;
-                    if (bitmap_data[byte_idx] & (1 << bit_pos)) {
-                        val.str_val.table_id = table_id;
-                        val.str_val.col_id = col_id;
-                        val.str_val.page_id = idx;
-                        val.str_val.offset = 4 + 2 * (cur_nv_row++);
-                        curbuf.data.push_back(val);
-                        if (curbuf.data.size() == MAX_PER_BUFFER_ENTRY) {
-                            buffers.push_back(curbuf);
-                            curbuf.data.clear();
-                            total_rows += MAX_PER_BUFFER_ENTRY;
-                        }
-                        continue;
-                    }
                     val.str_val.table_id = table_id;
                     val.str_val.col_id = col_id;
                     val.str_val.page_id = idx;
-                    val.str_val.offset = 0xFFFF; 
-                    curbuf.data.push_back(val);
+                    val.str_val.offset = (bitmap_data[byte_idx] & (1 << bit_pos)) ? 4 + 2 * (cur_nv_row++) : 0xFFFF;
+                    curbuf.data.push_back(std::move(val));
                     if (curbuf.data.size() == MAX_PER_BUFFER_ENTRY) {
-                        buffers.push_back(curbuf);
+                        buffers.push_back(std::move(curbuf));
                         curbuf.data.clear();
-                        total_rows += MAX_PER_BUFFER_ENTRY;
                     }
                 }
             }
-            if (!curbuf.data.empty()) {
-                total_rows += curbuf.data.size();
-                buffers.push_back(curbuf);
-            }
-            new_column.buffers = std::move(buffers);
-            new_column.num_rows = total_rows;
             break;
         }
     }
+    if (!curbuf.data.empty()) {
+        buffers.push_back(std::move(curbuf));
+    }
+    new_column.buffers = std::move(buffers);
+    new_column.num_rows = curbuf.data.size() + buffers.size() * MAX_PER_BUFFER_ENTRY;
    
 }
 
@@ -363,9 +334,7 @@ ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
             }
         },
         node.data));
-    // std::cout << "Node " << node_idx << " rows: "
-            //   << ((ret.empty() ? 0 : ret[0].num_rows)) << std::endl;
-    return ret;
+    return std::move(ret);
 }
 
 ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& result, const std::vector<DataType>& attr_vec) {
@@ -453,7 +422,6 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
         inserter_int32.finalize();
         inserter_str.finalize();
         table.columns.push_back(std::move(column));
-        // std::cout << "after" << std::endl;
     }
     return table;
 }
@@ -461,11 +429,10 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
 ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     namespace views = ranges::views;
     auto ret        = execute_impl(plan, plan.root);
-    // std::cout << ((ret.empty() ? 0 : ret[0].num_rows)) << std::endl;
     std::vector<DataType> ret_attr_vec;
     ret_attr_vec.reserve(plan.nodes[plan.root].output_attrs.size());
     for (const auto& attr : plan.nodes[plan.root].output_attrs) {
-        ret_attr_vec.push_back(std::get<1>(attr));
+        ret_attr_vec.push_back(std::move(std::get<1>(attr)));
     }
     ColumnarTable table = materialize_columnar_table(plan, ret, ret_attr_vec);
     return table;
