@@ -106,10 +106,9 @@ struct JoinAlgorithm {
         const auto& build_column = build_side[build_col];
         const auto& probe_column = probe_side[probe_col];
 
-        // Fail-safe: if build or probe column is empty, return empty columns
+        //if either side is empty, return empty result
         if (build_column.buffers.empty() || probe_column.buffers.empty()) {
             results.resize(output_attrs.size());
-            results.clear();
             return;
         }
         for (auto [idx, buffer] : build_column.buffers | views::enumerate) {
@@ -126,7 +125,6 @@ struct JoinAlgorithm {
                 }
             }
         }
-        // For each probe row, check for matches and build output buffers row-wise
         for (auto [probe_idx, probe_buffer] : probe_column.buffers | views::enumerate) {
             for (size_t i = 0; i < probe_buffer.data.size(); ++i) {
                 value_t probe_val = probe_buffer.data[i];
@@ -134,32 +132,40 @@ struct JoinAlgorithm {
                 if (probe_val.int32_val.status) {
                     if (auto loc = hash_table.find(key); loc != hash_table.end()) {
                         for (auto build_idx : *loc) {
-                            std::vector<value_t> output_row;
-                            output_row.reserve(output_attrs.size());
+                            size_t probe_global_idx = probe_idx * MAX_PER_BUFFER_ENTRY + i;
+                            size_t left_row_idx = build_left ? build_idx : probe_global_idx;
+                            size_t right_row_idx = build_left ? probe_global_idx : build_idx;
+
                             for (auto [out_idx, attr] : output_attrs | views::enumerate) {
                                 auto col_idx = std::get<0>(attr);
-                                DataType dtype = std::get<1>(attr);
-                                size_t columnar_buf_idx, columnar_row_offset;
+                                
+                                size_t target_row_idx;
+                                const ExecuteResult* target_side;
+                                size_t target_col_idx;
+
                                 if (col_idx < left.size()) {
-                                    columnar_buf_idx = build_idx / MAX_PER_BUFFER_ENTRY;
-                                    columnar_row_offset = build_idx % MAX_PER_BUFFER_ENTRY;
-                                    column_t side = left[col_idx];
-                                    buffer_t buf = side.buffers[columnar_buf_idx];
-                                    value_t val = buf.data[columnar_row_offset];
-                                    output_row.push_back(val);
+                                    target_side = &left;
+                                    target_col_idx = col_idx;
+                                    target_row_idx = left_row_idx;
                                 } else {
-                                    size_t right_col_idx = col_idx - left.size();
-                                    columnar_buf_idx = probe_idx;
-                                    columnar_row_offset = i;
-                                    output_row.push_back(right[right_col_idx].buffers[columnar_buf_idx].data[columnar_row_offset]);
+                                    target_side = &right;
+                                    target_col_idx = col_idx - left.size();
+                                    target_row_idx = right_row_idx;
                                 }
-                            }
-                            for (size_t col = 0; col < output_row.size(); ++col) {
-                                if (temp_results[col].buffers.empty() || (temp_results[col].buffers.back().data.size() == MAX_PER_BUFFER_ENTRY)) {
-                                    temp_results[col].buffers.emplace_back();
+
+                                size_t columnar_buf_idx = target_row_idx / MAX_PER_BUFFER_ENTRY;
+                                size_t columnar_row_offset = target_row_idx % MAX_PER_BUFFER_ENTRY;
+                                
+                                const auto& side = (*target_side)[target_col_idx];
+                                const auto& buf = side.buffers[columnar_buf_idx];
+                                value_t val = buf.data[columnar_row_offset];
+
+                                auto& res_col = temp_results[out_idx];
+                                if (res_col.buffers.empty() || (res_col.buffers.back().data.size() == MAX_PER_BUFFER_ENTRY)) {
+                                    res_col.buffers.emplace_back();
                                 }
-                                temp_results[col].buffers.back().data.push_back(output_row[col]);
-                                temp_results[col].num_rows++;
+                                res_col.buffers.back().data.push_back(val);
+                                res_col.num_rows++;
                             }
                         }
                     }
@@ -268,6 +274,11 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
                     val.str_val.page_id = idx;
                     val.str_val.offset = 4;
                     curbuf.data.push_back(val);
+                    if (curbuf.data.size() == MAX_PER_BUFFER_ENTRY) {
+                        buffers.push_back(curbuf);
+                        curbuf.data.clear();
+                        total_rows += MAX_PER_BUFFER_ENTRY;
+                    }
                     continue;
                 }
                 else if (nr == 0xfffe) {
@@ -352,16 +363,16 @@ ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
             }
         },
         node.data));
-    std::cout << "Node " << node_idx << " rows: "
-              << ((ret.empty() ? 0 : ret[0].num_rows)) << std::endl;
+    // std::cout << "Node " << node_idx << " rows: "
+            //   << ((ret.empty() ? 0 : ret[0].num_rows)) << std::endl;
     return ret;
 }
 
 ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& result, const std::vector<DataType>& attr_vec) {
     ColumnarTable table;
     table.num_rows = result.empty() ? 0 : result[0].num_rows;
-    std::cout << table.num_rows << std::endl; // ONLY PRINTS 0 (PROBLEM?)
-    std::cout << "before" << std::endl;
+    // std::cout << table.num_rows << std::endl; // ONLY PRINTS 0 (PROBLEM?)
+    // std::cout << "before" << std::endl;
     for (size_t col_idx = 0; col_idx < attr_vec.size(); ++col_idx) {
         Column column(attr_vec[col_idx]);
         ColumnInserter<std::string> inserter_str{column};
@@ -442,7 +453,7 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
         inserter_int32.finalize();
         inserter_str.finalize();
         table.columns.push_back(std::move(column));
-        std::cout << "after" << std::endl;
+        // std::cout << "after" << std::endl;
     }
     return table;
 }
@@ -450,7 +461,7 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
 ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     namespace views = ranges::views;
     auto ret        = execute_impl(plan, plan.root);
-    std::cout << ((ret.empty() ? 0 : ret[0].num_rows)) << std::endl;
+    // std::cout << ((ret.empty() ? 0 : ret[0].num_rows)) << std::endl;
     std::vector<DataType> ret_attr_vec;
     ret_attr_vec.reserve(plan.nodes[plan.root].output_attrs.size());
     for (const auto& attr : plan.nodes[plan.root].output_attrs) {
