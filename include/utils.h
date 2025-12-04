@@ -7,6 +7,9 @@
 #endif
 
 
+#define MAX_PER_BUFFER_ENTRY (PAGE_SIZE / sizeof(int64_t))
+
+
 
 static inline uint64_t crc64(uint64_t key) {
 	return __builtin_ia32_crc32di(key, 0);
@@ -29,3 +32,42 @@ uint64_t crc_hash(const T& key) {
 		return 0LL;
 	}
 }
+
+
+
+
+struct string_struct {
+    uint16_t table_id;
+    uint16_t col_id;
+    uint16_t page_id;
+    uint16_t offset;
+};
+
+struct int32_wrapper {
+    int32_t val;
+    int32_t status;
+};
+
+union value_t {
+    int32_wrapper int32_val;
+    string_struct str_val;
+};
+
+struct buffer_t {
+    std::vector<value_t> data; // 64-bit entries of type string_struct/int32_wrapper
+};
+
+
+struct column_t {
+    std::vector<buffer_t> buffers;
+    size_t                num_rows;
+    DataType              type;
+
+    column_t() : num_rows(0), type(DataType::INT32) {}
+    column_t(const DataType& dt) : num_rows(0), type(dt) {}
+    inline value_t get_value(size_t row_idx) const {
+        size_t buf_idx = row_idx / MAX_PER_BUFFER_ENTRY;
+        size_t buf_offset = (row_idx % MAX_PER_BUFFER_ENTRY);
+        return buffers[buf_idx].data[buf_offset];
+    } 
+};

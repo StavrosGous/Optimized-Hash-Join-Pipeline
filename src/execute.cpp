@@ -7,56 +7,16 @@
 #include <iostream>
 #include <cmath>
 #include <string_view>
+#include "unchained_ht.h"
 
 #ifndef HASH_MAP
 #define HASH_MAP 1
 #endif
 
 
-#define MAX_PER_BUFFER_ENTRY (PAGE_SIZE / sizeof(int64_t))
-
 
 namespace Contest {
 
-
-struct string_struct {
-    uint16_t table_id;
-    uint16_t col_id;
-    uint16_t page_id;
-    uint16_t offset;
-};
-
-struct int32_wrapper {
-    int32_t val;
-    int32_t status;
-    // inline bool notNull() {
-    //     return status & 1;
-    // }
-};
-
-union value_t {
-    int32_wrapper int32_val;
-    string_struct str_val;
-};
-
-struct buffer_t {
-    std::vector<value_t> data; // 64-bit entries of type string_struct/int32_wrapper
-};
-
-
-struct column_t {
-    std::vector<buffer_t> buffers;
-    size_t                num_rows;
-    DataType              type;
-
-    column_t() : num_rows(0), type(DataType::INT32) {}
-    column_t(const DataType& dt) : num_rows(0), type(dt) {}
-    inline value_t get_value(size_t row_idx) const {
-        size_t buf_idx = row_idx / MAX_PER_BUFFER_ENTRY;
-        size_t buf_offset = (row_idx % MAX_PER_BUFFER_ENTRY);
-        return buffers[buf_idx].data[buf_offset];
-    } 
-};
 
 // using ExecuteResult = std::vector<std::vector<value_t>>;
 using ExecuteResult = std::vector<column_t>;
@@ -99,7 +59,7 @@ struct JoinAlgorithm {
         const size_t build_col = build_left ? left_col : right_col;
         const size_t probe_col = build_left ? right_col : left_col;
 
-        HopscotchMap<int32_t, std::vector<size_t>> hash_table(build_side.size() * 1.6);
+        
         ExecuteResult temp_results;
         temp_results.resize(output_attrs.size());
 
@@ -111,27 +71,20 @@ struct JoinAlgorithm {
             results.resize(output_attrs.size());
             return;
         }
-        for (auto [idx, buffer] : build_column.buffers | views::enumerate) {
-            for (size_t i = 0; i < buffer.data.size(); ++i) {
-                value_t wrapper_val = buffer.data[i];
-                int32_wrapper int32_val = wrapper_val.int32_val;
-                int32_t key = int32_val.val;
-                if (int32_val.status) {
-                    if (auto loc = hash_table.find(key); loc == hash_table.end()) {
-                        hash_table.emplace(key, std::vector<size_t>{idx * MAX_PER_BUFFER_ENTRY + i});
-                    } else {
-                        loc->push_back(idx * MAX_PER_BUFFER_ENTRY + i);
-                    }
-                }
-            }
-        }
+        UnchainedHashTable hash_table(build_column.num_rows);
+        std::cout << "Building hash table..." << std::endl;
+        hash_table.build(build_column);
+        std::cout << "Hash table built with " << build_column.num_rows << " entries." << std::endl;
         for (auto [probe_idx, probe_buffer] : probe_column.buffers | views::enumerate) {
             for (size_t i = 0; i < probe_buffer.data.size(); ++i) {
                 value_t probe_val = probe_buffer.data[i];
                 int32_t key = probe_val.int32_val.val;
                 if (probe_val.int32_val.status) {
-                    if (auto loc = hash_table.find(key); loc != hash_table.end()) {
-                        for (auto build_idx : *loc) {
+                    if (auto loc = hash_table.lookup(key); loc.size() > 0) {
+                        for (auto entry_ptr : loc) {
+                            uint16_t buf_idx = entry_ptr->buf_idx;
+                            uint16_t idx = entry_ptr->offset;
+                            size_t build_idx = buf_idx * MAX_PER_BUFFER_ENTRY + idx;
                             size_t probe_global_idx = probe_idx * MAX_PER_BUFFER_ENTRY + i;
                             size_t left_row_idx = build_left ? build_idx : probe_global_idx;
                             size_t right_row_idx = build_left ? probe_global_idx : build_idx;
