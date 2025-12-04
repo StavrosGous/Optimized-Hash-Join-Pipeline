@@ -72,9 +72,9 @@ struct JoinAlgorithm {
             return;
         }
         UnchainedHashTable hash_table(build_column.num_rows);
-        std::cout << "Building hash table..." << std::endl;
+        // std::cout << "Building hash table..." << std::endl;
         hash_table.build(build_column);
-        std::cout << "Hash table built with " << build_column.num_rows << " entries." << std::endl;
+        // std::cout << "Hash table built with " << build_column.num_rows << " entries." << std::endl;
         for (auto [probe_idx, probe_buffer] : probe_column.buffers | views::enumerate) {
             for (size_t i = 0; i < probe_buffer.data.size(); ++i) {
                 value_t probe_val = probe_buffer.data[i];
@@ -252,7 +252,11 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
         buffers.push_back(std::move(curbuf));
     }
     new_column.buffers = std::move(buffers);
-    new_column.num_rows = curbuf.data.size() + buffers.size() * MAX_PER_BUFFER_ENTRY;
+    if (new_column.buffers.empty()) {
+        new_column.num_rows = 0;
+    } else {
+        new_column.num_rows = (new_column.buffers.size() - 1) * MAX_PER_BUFFER_ENTRY + new_column.buffers.back().data.size();
+    }
    
 }
 
