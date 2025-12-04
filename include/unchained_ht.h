@@ -315,18 +315,18 @@ public:
     }
 
     void build(const column_t& col) {
-        // std::cout << "1o" << std::endl;
         // First pass fills directory slots' upper 48 bits with byte counts
         for (auto &buffer : col.buffers) {
             for (auto i = 0; i < buffer.data.size(); ++i) {
+                if (!buffer.data[i].int32_val.status) continue;
                 int32_t key = buffer.data[i].int32_val.val;
                 uint64_t hash = crc_hash(key);
-                uint64_t slot = hash >> shift; // Determine directory slot
+                uint64_t slot = hash >> shift; 
                 directory[slot] += sizeof(Entry) << 16;
                 directory[slot] |= computeTag(hash);
             }
         }
-        // std::cout << "2o" << std::endl;
+        
         // Second pass to compute directory slot ranges
         uint64_t cur = (uint64_t)(tuples);
         for (uint64_t i = 0; i < capacity; i++) {
@@ -334,20 +334,15 @@ public:
             directory[i] = (cur << 16) | ((uint16_t)directory[i]);
             cur += val;
         }
-        // std::cout << "3o" << std::endl;
-        // std::cout << "Capacity: " << capacity << std::endl;
 
         size_t count = 0;
         for (auto [buf_idx, buffer] : col.buffers | ranges::view::enumerate) {
             count += buffer.data.size();
-            // std::cout << "Buffer size: " << buffer.data.size() << std::endl;
             for (auto i = 0; i < buffer.data.size(); ++i) {
+                if (!buffer.data[i].int32_val.status) continue;
                 int32_t key = buffer.data[i].int32_val.val;
                 uint64_t slot = (crc_hash(key)) >> shift; 
                 Entry* target = (Entry*)(directory[slot] >> 16);
-                // std::cout << "Target address: " << target << std::endl;
-                // std::cout << "base address: " << (&tuples[0]) << std::endl;
-                // std::cout << "end address: " << (&tuples[capacity - 1]) << std::endl;
                 target->buf_idx = buf_idx; //segmentation fault
                 target->offset = i;
                 target->key = key;
