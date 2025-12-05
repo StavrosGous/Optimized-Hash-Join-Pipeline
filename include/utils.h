@@ -9,7 +9,15 @@
 
 #define MAX_PER_BUFFER_ENTRY (PAGE_SIZE / sizeof(int64_t))
 
+template <typename P>
+static inline uint16_t read_u16(const P* p) {
+    return *reinterpret_cast<const uint16_t*>(reinterpret_cast<const void*>(p));
+}
 
+template <typename P>
+static inline int32_t read_i32(const P* p) {
+    return *reinterpret_cast<const int32_t*>(reinterpret_cast<const void*>(p));
+}
 
 static inline uint64_t crc64(uint64_t key) {
 	return __builtin_ia32_crc32di(key, 0);
@@ -54,7 +62,34 @@ union value_t {
 };
 
 struct buffer_t {
-    std::vector<value_t> data; // 64-bit entries of type string_struct/int32_wrapper
+    value_t* data;
+    uint16_t count;
+
+    buffer_t() {
+        data = new value_t[MAX_PER_BUFFER_ENTRY];
+        count = 0;
+    }
+    ~buffer_t() {
+        if (data) delete[] data;
+    }
+    buffer_t(buffer_t&& other) noexcept {
+        data = other.data;
+        count = other.count;
+        other.data = nullptr;
+        other.count = 0;
+    }
+    buffer_t& operator=(buffer_t&& other) noexcept {
+        if (this != &other) {
+            if (data) delete[] data;
+            data = other.data;
+            count = other.count;
+            other.data = nullptr;
+            other.count = 0;
+        }
+        return *this;
+    }
+    buffer_t(const buffer_t&) = delete;
+    buffer_t& operator=(const buffer_t&) = delete;
 };
 
 

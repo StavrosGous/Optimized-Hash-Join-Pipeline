@@ -1,10 +1,12 @@
 #pragma once
 
+#include <vector>
 #include <cstdint>
 #include <iostream>
 #include <algorithm>
 #include <random>
 #include <cstring>
+#include <utility>
 #include "utils.h"
 
 const uint16_t tags[1 << 11] =
@@ -295,23 +297,26 @@ public:
         if (directory) delete[] (directory - 1);
     }
 
-    inline std::pair<Entry*, Entry*> lookup(const int32_t key) const {
+    std::pair<Entry*, Entry*> lookup(const int32_t key) const {
         uint64_t hash = crc_hash(key);
         uint64_t slot = hash >> shift;
         uint64_t entry = directory[slot];
-        
-        // Bloom filter check
         if (!couldContain((uint16_t)entry, hash)) return {nullptr, nullptr};
-        
         Entry* start = (Entry*)(directory[slot - 1] >> 16);
         Entry* end = (Entry*)(entry >> 16);
         return {start, end};
     }
 
-    inline void build(const column_t& col) {
+    void prefetch(const int32_t key) const {
+        uint64_t hash = crc_hash(key);
+        uint64_t slot = hash >> shift;
+        __builtin_prefetch(&directory[slot]);
+    }
+
+    void build(const column_t& col) {
         // First pass fills directory slots' upper 48 bits with byte counts
         for (auto &buffer : col.buffers) {
-            for (auto i = 0; i < buffer.data.size(); ++i) {
+            for (auto i = 0; i < buffer.count; ++i) {
                 if (!buffer.data[i].int32_val.status) continue;
                 int32_t key = buffer.data[i].int32_val.val;
                 uint64_t hash = crc_hash(key);
@@ -331,13 +336,13 @@ public:
 
         size_t count = 0;
         for (auto [buf_idx, buffer] : col.buffers | ranges::view::enumerate) {
-            count += buffer.data.size();
-            for (auto i = 0; i < buffer.data.size(); ++i) {
+            count += buffer.count;
+            for (auto i = 0; i < buffer.count; ++i) {
                 if (!buffer.data[i].int32_val.status) continue;
                 int32_t key = buffer.data[i].int32_val.val;
                 uint64_t slot = (crc_hash(key)) >> shift; 
                 Entry* target = (Entry*)(directory[slot] >> 16);
-                target->buf_idx = buf_idx; //segmentation fault
+                target->buf_idx = buf_idx;
                 target->offset = i;
                 target->key = key;
                 directory[slot] += sizeof(Entry) << 16;
