@@ -54,6 +54,7 @@ struct JoinAlgorithm {
     auto run() {
         namespace views = ranges::views;
         // using hashmap_type = typename HashMapSelector<HASH_MAP, T>::type;
+        
         auto& build_side = build_left ? left : right;
         auto& probe_side = build_left ? right : left;
         const size_t build_col = build_left ? left_col : right_col;
@@ -63,18 +64,23 @@ struct JoinAlgorithm {
         ExecuteResult temp_results;
         temp_results.resize(output_attrs.size());
 
-        const auto& build_column = build_side[build_col];
-        const auto& probe_column = probe_side[probe_col];
+        auto const &temp_build_column = build_side[build_col];
+        auto const &temp_probe_column = probe_side[probe_col];
 
         //if either side is empty, return empty result
-        if (build_column.buffers.empty() || probe_column.buffers.empty()) {
+        if (temp_build_column.buffers.empty() || temp_probe_column.buffers.empty()) {
             results.resize(output_attrs.size());
             return;
         }
+        bool normal = (temp_build_column.num_rows <= temp_probe_column.num_rows);
+        build_left ^= !normal;
+        auto const &build_column = normal ? temp_build_column : temp_probe_column;
+        auto const &probe_column = normal ? temp_probe_column : temp_build_column;
+
         UnchainedHashTable hash_table(build_column.num_rows);
-        // std::cout << "Building hash table..." << std::endl;
         hash_table.build(build_column);
-        // std::cout << "Hash table built with " << build_column.num_rows << " entries." << std::endl;
+
+        //begin probing
         for (auto [probe_idx, probe_buffer] : probe_column.buffers | views::enumerate) {
             for (size_t i = 0; i < probe_buffer.data.size(); ++i) {
                 value_t probe_val = probe_buffer.data[i];
@@ -91,7 +97,6 @@ struct JoinAlgorithm {
 
                             for (auto [out_idx, attr] : output_attrs | views::enumerate) {
                                 auto col_idx = std::get<0>(attr);
-                                
                                 size_t target_row_idx;
                                 const ExecuteResult* target_side;
                                 size_t target_col_idx;
@@ -118,7 +123,6 @@ struct JoinAlgorithm {
                                     res_col.buffers.emplace_back();
                                 }
                                 res_col.buffers.back().data.push_back(std::move(val));
-                                res_col.num_rows++;
                             }
                         }
                     }
@@ -126,7 +130,10 @@ struct JoinAlgorithm {
             }
         }
         results = std::move(temp_results);
-        // std::cout << ((results.empty() ? 0 : results[0].num_rows)) << std::endl;
+        auto num_rows = results[0].buffers.empty() ? 0 : (results[0].buffers.size() - 1) * MAX_PER_BUFFER_ENTRY + results[0].buffers.back().data.size();
+        for (int i = 0; i < results.size(); ++i) {
+            results[i].num_rows = num_rows;
+        }
     }
 };
 
@@ -251,13 +258,8 @@ void build_column_inserter(const size_t table_id, const size_t col_id, const Col
     if (!curbuf.data.empty()) {
         buffers.push_back(std::move(curbuf));
     }
+    new_column.num_rows = (buffers.empty()) ? 0 : (buffers.size() - 1) * MAX_PER_BUFFER_ENTRY + buffers.back().data.size();
     new_column.buffers = std::move(buffers);
-    if (new_column.buffers.empty()) {
-        new_column.num_rows = 0;
-    } else {
-        new_column.num_rows = (new_column.buffers.size() - 1) * MAX_PER_BUFFER_ENTRY + new_column.buffers.back().data.size();
-    }
-   
 }
 
 ExecuteResult execute_scan(const Plan&               plan,
