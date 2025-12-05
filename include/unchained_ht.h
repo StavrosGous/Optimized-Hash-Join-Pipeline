@@ -1,6 +1,5 @@
 #pragma once
 
-#include <vector>
 #include <cstdint>
 #include <iostream>
 #include <algorithm>
@@ -279,7 +278,6 @@ public:
     };
 
     UnchainedHashTable(size_t sz) {
-        // std::cout << "Initializing Unchained Hash Table of size: " << sz << std::endl;
         size_t shift_val = 10; // minimum size 1024 entries
         while ((1ULL << shift_val) <= sz) shift_val++;
         capacity = 1ULL << shift_val; // closest bigger power of 2 to capacity
@@ -297,24 +295,20 @@ public:
         if (directory) delete[] (directory - 1);
     }
 
-    std::vector<Entry*> lookup(const int32_t key) const {
+    inline std::pair<Entry*, Entry*> lookup(const int32_t key) const {
         uint64_t hash = crc_hash(key);
         uint64_t slot = hash >> shift;
         uint64_t entry = directory[slot];
-        if (!couldContain((uint16_t)entry, hash)) return {};
+        
+        // Bloom filter check
+        if (!couldContain((uint16_t)entry, hash)) return {nullptr, nullptr};
+        
         Entry* start = (Entry*)(directory[slot - 1] >> 16);
         Entry* end = (Entry*)(entry >> 16);
-        std::vector<Entry*> matches;
-        matches.reserve((end - start)/sizeof(Entry*));
-        for (Entry* cur = start; cur < end; ++cur) {
-            if (cur->key == key) {
-                matches.push_back(cur);
-            }
-        }
-        return std::move(matches);
+        return {start, end};
     }
 
-    void build(const column_t& col) {
+    inline void build(const column_t& col) {
         // First pass fills directory slots' upper 48 bits with byte counts
         for (auto &buffer : col.buffers) {
             for (auto i = 0; i < buffer.data.size(); ++i) {
@@ -349,7 +343,6 @@ public:
                 directory[slot] += sizeof(Entry) << 16;
             }
         }
-        // std::cout << "Total entries inserted: " << count << std::endl;
     }
 
 private:
