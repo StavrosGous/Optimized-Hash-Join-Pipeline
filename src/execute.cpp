@@ -9,7 +9,6 @@
 
 namespace Contest {
 
-
 using ExecuteResult = std::vector<column_t>;
 ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
 
