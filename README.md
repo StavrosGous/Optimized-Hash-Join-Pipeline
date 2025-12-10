@@ -1,24 +1,12 @@
 
 ![Actions Dashboard](https://github.com/uoa-k23a/k23a-2025-d1-2-odds-1-pipeline/actions/workflows/tests-workflow.yml/badge.svg)
 
-To run the program on plans.json do
+To build and run the program on plans.json do
 ```bash
-$ ./build.sh fast_plans <NUM>
-```
-Where NUM corresponds to the hashmap you want to run the program with (default is Robinhood):
-- **Robinhood** num: **0**
-- **Hopscotch** num: **1**
-- **Cuckoo** num: **2**
-
-For example, if you want to run the program with the **Robinhood** hashmap, you run:
-
-```bash
-$ ./build.sh fast_plans 0
+$ ./build.sh fast_plans
 $ ./run.sh fast_plans
 ```
 ## Tests
-For each hashmap implementation we created unit tests to ensure all methods work correctly.
-These files are located in the tests folder and are used supplementary to the original tests.
 
 To run these tests, you can use our `build.sh` and `run.sh` scripts by running the following instructions:
 
