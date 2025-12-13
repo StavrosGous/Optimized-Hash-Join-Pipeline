@@ -5,7 +5,8 @@
 #ifndef CAPACITY
 #define CAPACITY 64
 #endif
-
+#include "plan.h"
+#include "attribute.h"
 
 #define MAX_PER_BUFFER_ENTRY (PAGE_SIZE / sizeof(int64_t))
 

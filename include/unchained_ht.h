@@ -1,11 +1,7 @@
 #pragma once
 
-#include <vector>
+#include <cstddef>
 #include <cstdint>
-#include <iostream>
-#include <algorithm>
-#include <random>
-#include <cstring>
 #include <utility>
 #include "utils.h"
 
@@ -332,14 +328,15 @@ public:
         }
 
         size_t count = 0;
-        for (auto [buf_idx, buffer] : col.buffers | ranges::view::enumerate) {
+        for (size_t buf_idx = 0; buf_idx < col.buffers.size(); ++buf_idx) {
+            const auto& buffer = col.buffers[buf_idx];
             count += buffer.count;
             for (auto i = 0; i < buffer.count; ++i) {
                 if (!buffer.data[i].int32_val.status) continue;
                 int32_t key = buffer.data[i].int32_val.val;
-                uint64_t slot = (crc_hash(key)) >> shift; 
+                uint64_t slot = (crc_hash(key)) >> shift;
                 Entry* target = (Entry*)(directory[slot] >> 16);
-                target->buf_idx = buf_idx;
+                target->buf_idx = static_cast<uint16_t>(buf_idx);
                 target->offset = i;
                 target->key = key;
                 directory[slot] += sizeof(Entry) << 16;
