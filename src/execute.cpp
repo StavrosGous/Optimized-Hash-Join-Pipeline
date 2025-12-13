@@ -153,7 +153,7 @@ inline void build_column_inserter(const size_t table_id, const size_t col_id, co
 
                     value_t wrapper_val;
 
-                    if (bitmap_data[byte_idx] & (1 << bit_pos)) [[likely]] {
+                    if (bitmap_data[byte_idx] & (1 << bit_pos)) {
                         wrapper_val.int32_val.val = read_i32(page_data + 4 + 4 * (cur_nv_row++));
                         wrapper_val.int32_val.status = 1;
                     }
@@ -281,7 +281,7 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
         } else {
             for (size_t row_idx = 0; row_idx < table.num_rows; ++row_idx) {
                 value_t val = col.get_value(row_idx);
-                if (val.str_val.offset == 0xFFFF || !val.int32_val.status) [[unlikely]] {
+                if (val.str_val.offset == 0xFFFF || !val.int32_val.status) {
                     if (attr_vec[col_idx] == DataType::INT32) {
                         inserter_int32.insert_null();
                     } else if (attr_vec[col_idx] == DataType::VARCHAR) {
@@ -299,7 +299,7 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
                         uint16_t nr = read_u16(page_data);
                         uint16_t page_id = val.str_val.page_id;
                         bool is_long = false;
-                        if (nr == 0xffff) [[unlikely]] {
+                        if (nr == 0xffff) {
                             uint16_t nchars = read_u16(page_data + 2);
                             str.assign(reinterpret_cast<const char*>(page_data + 4), nchars);
                             page_id++;
@@ -315,26 +315,23 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
                                 page_data = reinterpret_cast<const uint8_t*>(page->data);
                                 nr = read_u16(page_data);
                             }
-                        }
-                        if (!is_long) [[likely]]{
-                            uint16_t end_offset_pos = offset;
-                            uint16_t end_offset;
-                            uint16_t start_offset;
-                            uint16_t base_offset = 4 + nr * 2;
-                            if (end_offset_pos > 4) {
-                                end_offset = read_u16(page_data + end_offset_pos) + base_offset;
-                                start_offset = read_u16(page_data + end_offset_pos - 2) + base_offset;
-                            } else {
-                                start_offset = base_offset;
-                                end_offset = read_u16(page_data + 4) + base_offset;
-                            }
-                            sview = std::string_view(reinterpret_cast<const char*>(page_data + start_offset), end_offset - start_offset);
-                        }
-                        if (is_long) {
                             inserter_str.insert(str);
-                        } else {
-                            inserter_str.insert(sview);
+                            continue;
                         }
+                        
+                        uint16_t end_offset_pos = offset;
+                        uint16_t end_offset;
+                        uint16_t start_offset;
+                        uint16_t base_offset = 4 + nr * 2;
+                        if (end_offset_pos > 4) {
+                            end_offset = read_u16(page_data + end_offset_pos) + base_offset;
+                            start_offset = read_u16(page_data + end_offset_pos - 2) + base_offset;
+                        } else {
+                            start_offset = base_offset;
+                            end_offset = read_u16(page_data + 4) + base_offset;
+                        }
+                        sview = std::string_view(reinterpret_cast<const char*>(page_data + start_offset), end_offset - start_offset);
+                        inserter_str.insert(sview);
                     } else {
                         inserter_int32.insert(val.int32_val.val);
                     }

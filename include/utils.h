@@ -1,11 +1,13 @@
 #pragma once
+
 #include <cstdint>
 #include <cstring>
 #include <iostream>
 #ifndef CAPACITY
 #define CAPACITY 64
 #endif
-
+#include "plan.h"
+#include "attribute.h"
 
 #define MAX_PER_BUFFER_ENTRY (PAGE_SIZE / sizeof(int64_t))
 
@@ -40,8 +42,6 @@ uint64_t crc_hash(const T& key) {
 		return 0LL;
 	}
 }
-
-
 
 
 struct string_struct {

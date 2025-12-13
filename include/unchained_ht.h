@@ -1,11 +1,7 @@
 #pragma once
 
-#include <vector>
+#include <cstddef>
 #include <cstdint>
-#include <iostream>
-#include <algorithm>
-#include <random>
-#include <cstring>
 #include <utility>
 #include "utils.h"
 
@@ -304,12 +300,6 @@ public:
         return {start, end};
     }
 
-    void prefetch(const int32_t key) const {
-        uint64_t hash = crc_hash(key);
-        uint64_t slot = hash >> shift;
-        __builtin_prefetch(&directory[slot]);
-    }
-
     void build(const column_t& col) {
         // First pass fills directory slots' upper 48 bits with byte counts
         for (auto &buffer : col.buffers) {
@@ -332,14 +322,15 @@ public:
         }
 
         size_t count = 0;
-        for (auto [buf_idx, buffer] : col.buffers | ranges::view::enumerate) {
+        for (size_t buf_idx = 0; buf_idx < col.buffers.size(); ++buf_idx) {
+            const auto& buffer = col.buffers[buf_idx];
             count += buffer.count;
             for (auto i = 0; i < buffer.count; ++i) {
                 if (!buffer.data[i].int32_val.status) continue;
                 int32_t key = buffer.data[i].int32_val.val;
-                uint64_t slot = (crc_hash(key)) >> shift; 
+                uint64_t slot = (crc_hash(key)) >> shift;
                 Entry* target = (Entry*)(directory[slot] >> 16);
-                target->buf_idx = buf_idx;
+                target->buf_idx = static_cast<uint16_t>(buf_idx);
                 target->offset = i;
                 target->key = key;
                 directory[slot] += sizeof(Entry) << 16;
