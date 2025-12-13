@@ -18,95 +18,25 @@ This will execute all of the tests.
 ## Changes made
 
 ### Header files
-We expanded `include/utils.h` significantly. Initially containing only hashing functions (`crc_hash`), it now houses the core data structures for our columnar engine:
-- **`value_t`**: The unified data type for late materialization.
-- **`buffer_t` & `column_t`**: Structures for managing columnar data chunks.
-- **`read_u16` / `read_i32`**: Helpers for unaligned memory reads.
+Added the structs used and some helper functions to "utils.h"
+- **`value_t`**: Struct for late materialization 
+- **`column_t`**: Struct that contains all values of a column in multiple buffers 
+(in buffer_t struct)
+- **`int32_wrapper`**: 64-bit struct that uses the upper 32 bits for the value and the lower 32 bits for null info.
+- **`buffer_t`**: Struct that stores a fixed amount of value_t values in an array 
+- **`read_u16` / `read_i32`**: Memory read helper functions.
 
-Additionally, we added `include/unchained_ht.h` which contains the implementation of our specialized `UnchainedHashTable`. This header defines the `Entry` structure and the hash table logic optimized for our columnar data format.
+Added `include/unchained_ht.h` which contains the implementation of our specialized `UnchainedHashTable`. The code for the hashtable implementation followed the given paper's instructions closely. We created an "Entry" struct with 64 bits size, so that we map keys to the buffer ids and offsets the values are stored at (a similar class "T" was proposed in the paper). It is worth noting that instead of a "produce(cur)" function scheme as proposed in the paper we decided to return two Entry* pointers, one to the start of the list of duplicates returned from lookup and one to the end, so that the lookup's result can be iterated with an Entry* pointer. We also precomputed and hardcoded the tags with 4 set bits (instead of computing 1820 tags in runtime and padding them when building the hashtable).
+
 
 ### execute.cpp
-We edited `execute.cpp` for every step of the exercise. For the late materialization step, we created a `value_t` struct as said in the exercise description. This `value_t` contains a union of `int32_t` and `string_struct`, along with bitfields for `is_string` and `is_null` flags. This replaces the `std::variant` based `Data` type, reducing memory overhead and avoiding `std::visit` calls.
+We edited `execute.cpp` for every step of the exercise. For the late materialization step, we created a `value_t` struct as said in the exercise description. This `value_t` contains a union of `int32_wrapper` and `string_struct`. This replaces the `std::variant` based `Data` type, reducing memory overhead and avoiding `std::visit` call.
 
-```cpp
-struct value_t {
-    // pack flags into a single byte using bitfields to reduce size and improve cache
-    unsigned is_string : 1;
-    unsigned is_null : 1;
-    union {
-        int32_t       int32_val;
-        string_struct str_val;
-    };
-};
-```
+## Key changes implemented:
+- **Late Materialization**: Strings are not fully materialized during the join. Instead, we store a `string_struct` containing `table_id`, `col_id`, `page_id`, and `offset`. The actual string data is retrieved from the pages only during the final materialization phase. The function `materialize_columnar_table` is responsible for the materialization of all strings. 
+- **Column Store Optimization**: `ExecuteResult` is now `std::vector<column_t>`, where each `column_t` represents a column of data. And all values of a column are stored into `buffer_t` structs (column_t structs contain vectors of `value_t`).
+- **Unchained Hash Table Optimization**
+In the final optimization step, we replaced the hopscotch hashmap with our `UnchainedHashTable` hashmap (implemented in "/include/unchained_ht.cpp"). It should be noted, along with the previous comments on the hashmap, that unlike the old hashmaps that had an insert function, this hashmap has a build function (like in the paper but for 1 partition) that takes a column_t object as argument and then builds the hashtable on the given column.
 
-Key changes implemented:
-- **Late Materialization**: Strings are not fully materialized during the join. Instead, we store a `string_struct` containing `table_id`, `col_id`, `page_id`, and `offset`. The actual string data is retrieved from the pages only during the final materialization phase.
-- **Custom Value Type**: The `value_t` struct is packed to minimize size and improve cache locality.
-- **Manual Page Parsing**: We implemented `build_column_inserter` to manually read values and null bitmaps directly from raw page data, bypassing higher-level iterator overhead.
-- **Direct Type Access**: The join algorithm now accesses values directly via `value_t` members, eliminating the runtime overhead of `std::visit`.
-
-### Column Store Optimization
-For the second step, we transitioned from a row-oriented execution model to a column-oriented one.
-- **Columnar Layout**: `ExecuteResult` is now `std::vector<column_t>`, where each `column_t` represents a column of data.
-- **Buffered Storage**: Data within columns is organized into `buffer_t` chunks (vectors of `value_t`). This improves cache locality and allows for processing data in blocks.
-- **Struct Changes**: `value_t` was simplified to a union of `int32_wrapper` and `string_struct`. `int32_wrapper` includes a `status` field to handle NULL values, removing the need for separate bitflags in the main struct.
-- **Vectorized Processing**: The join algorithm and scan operators were updated to iterate over these buffers, enabling better compiler optimizations and potentially auto-vectorization.
-
-```cpp
-struct buffer_t {
-    value_t* data;
-    uint16_t count;
-    // ... (constructors and destructors)
-};
-
-struct column_t {
-    std::vector<buffer_t> buffers;
-    size_t                num_rows;
-    DataType              type;
-    // ...
-};
-```
-
-### Unchained Hash Table Optimization
-In the final optimization step, we replaced the general-purpose hash maps with a specialized `UnchainedHashTable` tailored for our columnar data layout.
-- **Specialized Design**: The hash table is built directly from `column_t` buffers, minimizing data movement and transformation overhead.
-- **Directory-based Structure**: It uses a large directory array to index into a dense array of `Entry` structs, effectively creating a perfect hash table for the directory slots.
-- **Tagging for Filtering**: We incorporated 11-bit tags within the directory entries. These tags allow us to check for potential key matches before accessing the actual data, significantly reducing unnecessary cache misses during lookups.
-- **Software Prefetching**: We added `__builtin_prefetch` instructions to preload directory entries into the cache during the probe phase, hiding memory access latency.
-- **Efficient Duplicate Handling**: The `lookup` method returns a range (start and end pointers) of matching entries, streamlining the handling of join keys with multiple matches.
-
-```cpp
-class UnchainedHashTable {
-public:
-    struct Entry {
-        int32_t key;
-        uint16_t buf_idx;
-        uint16_t offset;
-    };
-
-    UnchainedHashTable(size_t sz);
-    ~UnchainedHashTable();
-
-    void build(const column_t& col);
-    void prefetch(const int32_t key) const;
-    std::pair<Entry*, Entry*> lookup(const int32_t key) const;
-};
-```
-
-## Implementation
-We followed the exercise description and the recommendations from the referenced research paper for implementing all algorithms. Specifically:
-
-- **Hash Function**: We retained the `crc_hash` function for its efficiency and low collision rate. This was used in both `Robinhood` and `Hopscotch` hashmaps. For the `Cuckoo` hashmap, we combined `crc_hash` with `std::hash` to meet the requirement for two hash functions.
-- **Hashmap Design**: Our hashmaps are generic and implement load-factor-based rehashing. However, we optimized capacity allocation to avoid rehashing during execution. By allocating arrays with a worst-case load factor of 0.625, we ensured efficient memory usage and performance.
-- **Unchained Hash Table**: For the unchained hash table, we closely followed the directory/tagging structure and range-based lookup design described in the recommended paper. This included optimizations for cache locality and efficient duplicate handling.
-- **execute.cpp Choices**: In `execute.cpp`, we made deliberate choices to align with best practices in analytical database systems:
-  - **Late Materialization**: Strings are stored as references (`string_struct`) and only materialized during the final phase.
-  - **Columnar Processing**: Data is processed in columnar format using `buffer_t` and `column_t` structures to maximize cache locality.
-  - **Direct Memory Access**: We bypassed higher-level abstractions to directly access raw page data, reducing overhead.
 
 All optimizations were implemented incrementally, with each step validated for correctness and performance improvements.
-
-
-
-
