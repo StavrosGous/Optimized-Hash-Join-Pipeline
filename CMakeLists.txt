@@ -87,14 +87,6 @@ if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "ppc|powerpc|ppc64|ppc64le")
     add_compile_options(-march=native)
 endif()
 
-# Add optimization and debug info
-# add_compile_options(-O2)
-# add_compile_options(-g)
-
-# Define HASH_MAP compile definition if specified
-if(DEFINED HASH_MAP)
-    add_compile_definitions(HASH_MAP=${HASH_MAP})
-endif()
 
 # Targets
 file(GLOB UNIT_TEST_SRC
@@ -107,19 +99,12 @@ list(FILTER UNIT_TEST_SRC EXCLUDE REGEX "/build_database\\.cpp$")
 add_executable(run ${SIGMODPC_SRC} tests/read_sql.cpp)
 add_executable(unit_tests ${SIGMODPC_SRC} ${UNIT_TEST_SRC})
 add_executable(build_database tests/build_database.cpp)
-add_executable(cuckoo_tests tests/cuckoo_tests.cpp)
-add_executable(hopscotch_tests tests/hopscotch_tests.cpp)
-
-add_executable(robinhood_tests tests/robinhood_tests.cpp)
 
 # For all executables
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_compile_definitions(run PRIVATE _CRT_SECURE_NO_WARNINGS)
     target_compile_definitions(build_database PRIVATE _CRT_SECURE_NO_WARNINGS)
     target_compile_definitions(unit_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
-    target_compile_definitions(cuckoo_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
-    target_compile_definitions(hopscotch_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
-    target_compile_definitions(robinhood_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
@@ -137,17 +122,11 @@ target_link_libraries(run PRIVATE re2 fmt range-v3 nlohmann_json::nlohmann_json 
 target_compile_definitions(run PRIVATE TEAMOPT_USE_DUCKDB)
 target_link_libraries(build_database PRIVATE fmt duckdb)
 target_link_libraries(unit_tests PRIVATE re2 range-v3 fmt Catch2::Catch2WithMain)
-target_link_libraries(cuckoo_tests PRIVATE re2 range-v3 fmt Catch2::Catch2WithMain)
-target_link_libraries(hopscotch_tests PRIVATE re2 range-v3 fmt Catch2::Catch2WithMain)
-target_link_libraries(robinhood_tests PRIVATE re2 range-v3 fmt Catch2::Catch2WithMain)
 
 
 target_include_directories(run PRIVATE include)
 target_include_directories(build_database PRIVATE include)
 target_include_directories(unit_tests PRIVATE include)
-target_include_directories(cuckoo_tests PRIVATE include)
-target_include_directories(hopscotch_tests PRIVATE include)
-target_include_directories(robinhood_tests PRIVATE include)
 
 
 
