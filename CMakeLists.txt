@@ -87,14 +87,6 @@ if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "ppc|powerpc|ppc64|ppc64le")
     add_compile_options(-march=native)
 endif()
 
-# Add optimization and debug info
-# add_compile_options(-O2)
-# add_compile_options(-g)
-
-# Define HASH_MAP compile definition if specified
-if(DEFINED HASH_MAP)
-    add_compile_definitions(HASH_MAP=${HASH_MAP})
-endif()
 
 # Targets
 file(GLOB UNIT_TEST_SRC

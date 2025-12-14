@@ -5,8 +5,8 @@
 #include <utility>
 #include "utils.h"
 
-const uint16_t tags[2048] = {
-    0x000F, 0x0017, 0x0027, 0x0047, 0x0087, 0x0107, 0x0207, 0x0407,
+const uint16_t tags[2048] = {   // Precalculated 4 bit Bloom filter tags + padding
+    0x000F, 0x0017, 0x0027, 0x0047, 0x0087, 0x0107, 0x0207, 0x0407, 
     0x0807, 0x1007, 0x2007, 0x4007, 0x8007, 0x001B, 0x002B, 0x004B,
     0x008B, 0x010B, 0x020B, 0x040B, 0x080B, 0x100B, 0x200B, 0x400B,
     0x800B, 0x0033, 0x0053, 0x0093, 0x0113, 0x0213, 0x0413, 0x0813,
@@ -273,15 +273,16 @@ public:
     };
 
     UnchainedHashTable(size_t sz) {
-        size_t shift_val = 10; // minimum size 1024 entries
-        while ((1ULL << shift_val) <= sz) shift_val++;
-        capacity = 1ULL << shift_val; // closest bigger power of 2 to capacity
+        size_t shift_val = 9; // minimum size 512 entries
+        while ((1 << shift_val) <= sz) shift_val++;
+        capacity = 1 << shift_val; // closest bigger power of 2 to capacity
 
-        // Allocate directory with one extra element for the -1 index trick
+        // allocate directory with one extra element for the -1 index trick
         directory = new uint64_t[capacity + 1]();
         directory++;   
         this->shift = 64 - shift_val;
         tuples = new Entry[capacity]();
+        // pointer to the beginning of tuple storage at directory[-1]
         directory[-1] = (uint64_t)tuples << 16;
     }
 
@@ -295,13 +296,14 @@ public:
         uint64_t slot = hash >> shift;
         uint64_t entry = directory[slot];
         if (!couldContain((uint16_t)entry, hash)) return {nullptr, nullptr};
+        // instead of produceMatches function (as stated in paper), we return its start and end pointers
         Entry* start = (Entry*)(directory[slot - 1] >> 16);
         Entry* end = (Entry*)(entry >> 16);
         return {start, end};
     }
 
     void build(const column_t& col) {
-        // First pass fills directory slots' upper 48 bits with tuples bucket size
+        // first pass fills directory slots' upper 48 bits with tuples bucket size
         for (auto &buffer : col.buffers) {
             for (auto i = 0; i < buffer.count; ++i) {
                 if (!buffer.data[i].int32_val.status) continue;
@@ -309,18 +311,18 @@ public:
                 uint64_t hash = crc_hash(key);
                 uint64_t slot = hash >> shift; 
                 directory[slot] += sizeof(Entry) << 16;
-                directory[slot] |= computeTag(hash);
+                directory[slot] |= tags[((uint32_t)hash) >> (32 - 11)];
             }
         }
         
-        // Second pass computes the starting offset of each tuples bucket
+        // second pass computes the starting offset of each tuples bucket
         uint64_t cur = (uint64_t)(tuples);
         for (uint64_t i = 0; i < capacity; i++) {
             uint64_t val = directory[i] >> 16;
             directory[i] = (cur << 16) | ((uint16_t)directory[i]);
             cur += val;
         }
-        // Third pass stores a value of the buffer to the corresponding tuples bucket in the tuples array
+        // third pass stores a value of the buffer to the corresponding tuples bucket in the tuples array
         size_t count = 0;
         for (size_t buf_idx = 0; buf_idx < col.buffers.size(); ++buf_idx) {
             const auto& buffer = col.buffers[buf_idx];
@@ -343,14 +345,9 @@ private:
     Entry* tuples;
     uint64_t shift;
     size_t capacity;
-    
-    inline uint16_t computeTag(uint64_t hash) const {
-        return tags[((uint32_t)hash) >> (32 - 11)];
-    }
 
     inline bool couldContain(const uint16_t entry, const uint64_t hash) const {
-        uint16_t slot = ((uint32_t)hash) >> (32 - 11);
-        uint16_t tag = tags[slot];
-        return !(tag & ~entry);
+        uint16_t tag = tags[((uint32_t)hash) >> (32 - 11) /*shr*/ ]; // mov
+        return !(tag & ~entry); // andn
     }
 };

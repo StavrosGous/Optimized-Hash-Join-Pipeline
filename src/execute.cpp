@@ -10,11 +10,11 @@
 namespace Contest {
 
 using ExecuteResult = std::vector<column_t>;
-ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
-
+ExecuteResult execute_impl(const Plan&, size_t);
+inline void build_column_inserter(const size_t, const size_t, const Column&, DataType, column_t&);
+ColumnarTable materialize_columnar_table(const Plan&, const ExecuteResult&, const std::vector<DataType>&);
 
 struct JoinAlgorithm {
-    bool                                             build_left;
     ExecuteResult&                                   left;
     ExecuteResult&                                   right;
     ExecuteResult&                                   results;
@@ -24,29 +24,27 @@ struct JoinAlgorithm {
     template <class T>
     auto run() {
         namespace views = ranges::views;
-        auto& build_side = build_left ? left : right;
-        auto& probe_side = build_left ? right : left;
-        const size_t build_col = build_left ? left_col : right_col;
-        const size_t probe_col = build_left ? right_col : left_col;
-
         
         ExecuteResult temp_results;
         temp_results.resize(output_attrs.size());
 
-        const auto& build_column = build_side[build_col];
-        const auto& probe_column = probe_side[probe_col];
-
-        if (build_column.buffers.empty() || probe_column.buffers.empty()) {
+        const auto& left_col_val = left[left_col];
+        const auto& right_col_val = right[right_col];
+        if (left_col_val.buffers.empty() || right_col_val.buffers.empty()) {
             results.resize(output_attrs.size());
             return;
         }
+        // build left is now calculated based on the smaller column (as stated in paper)
+        bool build_left = (left_col_val.num_rows <= right_col_val.num_rows);
+        auto const &build_column = build_left ? left_col_val : right_col_val;
+        auto const &probe_column = build_left ? right_col_val : left_col_val;
         UnchainedHashTable hash_table(build_column.num_rows);
         hash_table.build(build_column);
-        // Helper struct to map the output columns to the corresponding input columns once before the join
+        // helper struct to map the output columns to the corresponding input columns once before the join
         struct OutputMapping {
-            const ExecuteResult* target_side;
-            size_t target_col_idx;
-            bool use_left_row_idx;
+            const ExecuteResult* target_side; // pointer to either left or right target side
+            size_t col_idx;
+            bool use_left; // 1 for row index usage, 0 for right
         };
         std::vector<OutputMapping> mappings;
         mappings.reserve(output_attrs.size());
@@ -73,15 +71,14 @@ struct JoinAlgorithm {
                             size_t probe_global_idx = probe_idx * MAX_PER_BUFFER_ENTRY + i;
                             size_t left_row_idx = build_left ? build_idx : probe_global_idx;
                             size_t right_row_idx = build_left ? probe_global_idx : build_idx;
-
                             for (size_t out_idx = 0; out_idx < mappings.size(); ++out_idx) {
                                 const auto& mapping = mappings[out_idx];
-                                size_t target_row_idx = mapping.use_left_row_idx ? left_row_idx : right_row_idx;
-
+                                size_t target_row_idx = mapping.use_left ? left_row_idx : right_row_idx;
+                                const auto& side = (*mapping.target_side)[mapping.col_idx];
+                                
                                 size_t columnar_buf_idx = target_row_idx / MAX_PER_BUFFER_ENTRY;
                                 size_t columnar_row_offset = target_row_idx % MAX_PER_BUFFER_ENTRY;
-                                
-                                const auto& side = (*mapping.target_side)[mapping.target_col_idx];
+            
                                 const auto& buf = side.buffers[columnar_buf_idx];
                                 value_t val = buf.data[columnar_row_offset];
 
@@ -91,7 +88,7 @@ struct JoinAlgorithm {
                                 }
                                 auto& last_buf = res_col.buffers.back();
                                 last_buf.data[last_buf.count++] = std::move(val);
-                                res_col.num_rows++;
+                                ++res_col.num_rows;
                             }
                         }
                 }
@@ -115,7 +112,7 @@ ExecuteResult execute_hash_join(const Plan&          plan,
     std::vector<column_t> results;
     results.reserve(std::min(left.size() + right.size(), static_cast<size_t>(left.size() * 2)));
 
-    JoinAlgorithm join_algorithm{.build_left = join.build_left,
+    JoinAlgorithm join_algorithm{
         .left                                = left,
         .right                               = right,
         .results                             = results,
@@ -127,7 +124,60 @@ ExecuteResult execute_hash_join(const Plan&          plan,
 }
 
 
-// Function to build our column_t from Column of the ColumnarTable 
+
+ExecuteResult execute_scan(const Plan&               plan,
+    const ScanNode&                                  scan,
+    const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
+    auto                           table_id = scan.base_table_id;
+    auto&                          input    = plan.inputs[table_id];
+    ExecuteResult                results(output_attrs.size());
+    for (const auto& [idx, attr] : output_attrs | ranges::views::enumerate) {
+        auto col_idx = std::get<0>(attr);
+        auto& column = input.columns[col_idx];
+        DataType data_type = column.type;
+        results[idx] = column_t(data_type);
+        build_column_inserter(table_id, col_idx, column, data_type, results[idx]);
+    }
+    return std::move(results);
+}
+
+ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
+    auto& node = plan.nodes[node_idx];
+    auto ret = (std::visit(
+        [&](const auto& value) {
+            using T = std::decay_t<decltype(value)>;
+            if constexpr (std::is_same_v<T, JoinNode>) {
+                return std::move(execute_hash_join(plan, value, node.output_attrs));
+            } else {
+                return std::move(execute_scan(plan, value, node.output_attrs));
+            }
+        },
+        node.data));
+    return std::move(ret);
+}
+
+
+ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
+    namespace views = ranges::views;
+    auto ret        = execute_impl(plan, plan.root);
+    std::vector<DataType> ret_attr_vec;
+    ret_attr_vec.reserve(plan.nodes[plan.root].output_attrs.size());
+    for (const auto& attr : plan.nodes[plan.root].output_attrs) {
+        ret_attr_vec.push_back(std::move(std::get<1>(attr)));
+    }
+    ColumnarTable table = materialize_columnar_table(plan, ret, ret_attr_vec);
+    return table;
+}
+
+void* build_context() {
+    return nullptr;
+}
+
+void destroy_context([[maybe_unused]] void* context) {}
+
+
+
+// function to build our column_t from Column of the ColumnarTable 
 inline void build_column_inserter(const size_t table_id, const size_t col_id, const Column& column, DataType data_type, column_t& new_column) {
     namespace views = ranges::views;
     auto& pages = column.pages;
@@ -137,28 +187,21 @@ inline void build_column_inserter(const size_t table_id, const size_t col_id, co
     switch (data_type) {
         case DataType::INT32: {
             for (auto& page : pages) {
-
                 const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
-
                 uint16_t nr = read_u16(page_data);
-
                 size_t bitmap_size = (nr + 7) / 8;
                 const uint8_t* bitmap_data = reinterpret_cast<const uint8_t*>(page_data) + PAGE_SIZE - bitmap_size;
-                
                 size_t cur_nv_row = 0;
-
                 for (size_t i = 0; i < nr; ++i) {
                     size_t byte_idx = i / 8;
                     size_t bit_pos = i % 8;
-
                     value_t wrapper_val;
-
                     if (bitmap_data[byte_idx] & (1 << bit_pos)) {
                         wrapper_val.int32_val.val = read_i32(page_data + 4 + 4 * (cur_nv_row++));
-                        wrapper_val.int32_val.status = 1;
+                        wrapper_val.int32_val.status = 1; //indicate non null value
                     }
                     else {
-                        wrapper_val.int32_val.status = 0;
+                        wrapper_val.int32_val.status = 0; // indicate null value
                     }
                     curbuf.data[curbuf.count++] = std::move(wrapper_val);
                     if (curbuf.count == MAX_PER_BUFFER_ENTRY) {
@@ -229,45 +272,14 @@ inline void build_column_inserter(const size_t table_id, const size_t col_id, co
    
 }
 
-ExecuteResult execute_scan(const Plan&               plan,
-    const ScanNode&                                  scan,
-    const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
-    auto                           table_id = scan.base_table_id;
-    auto&                          input    = plan.inputs[table_id];
-    ExecuteResult                results(output_attrs.size());
-    for (const auto& [idx, attr] : output_attrs | ranges::views::enumerate) {
-        auto col_idx = std::get<0>(attr);
-        auto& column = input.columns[col_idx];
-        DataType data_type = column.type;
-        results[idx] = column_t(data_type);
-        build_column_inserter(table_id, col_idx, column, data_type, results[idx]);
-    }
-    return std::move(results);
-}
 
-ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
-    auto& node = plan.nodes[node_idx];
-    auto ret = (std::visit(
-        [&](const auto& value) {
-            using T = std::decay_t<decltype(value)>;
-            if constexpr (std::is_same_v<T, JoinNode>) {
-                auto ret  = execute_hash_join(plan, value, node.output_attrs);
-                return std::move(ret);
-            } else {
-                auto ret = execute_scan(plan, value, node.output_attrs);
-                return std::move(ret);
-            }
-        },
-        node.data));
-    return std::move(ret);
-}
-// Function to materialize the final ExecuteResult into the corresponding ColumnarTable
+// function to materialize the final ExecuteResult into the corresponding ColumnarTable
 ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& result, const std::vector<DataType>& attr_vec) {
     ColumnarTable table;
     table.num_rows = result.empty() ? 0 : result[0].num_rows;
     for (size_t col_idx = 0; col_idx < attr_vec.size(); ++col_idx) {
         Column column(attr_vec[col_idx]);
-        // We use the ColumnInserters of plan.h to build hte ColumnarTable columns 
+        // we use the ColumnInserters of plan.h to build the ColumnarTable columns 
         ColumnInserter<std::string> inserter_str{column};
         ColumnInserter<int32_t> inserter_int32{column};
         const column_t& col = result[col_idx];
@@ -299,18 +311,18 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
                         std::string_view sview{nullptr, 0};
                         uint16_t nr = read_u16(page_data);
                         uint16_t page_id = val.str_val.page_id;
-                        // If hte string is long, we build the string page by page
+                        // if the string is long, we build the string page by page
                         if (nr == 0xffff) {
                             uint16_t nchars = read_u16(page_data + 2);
                             str.assign(reinterpret_cast<const char*>(page_data + 4), nchars);
-                            page_id++;
+                            ++page_id;
                             page = column.pages[page_id];
                             page_data = reinterpret_cast<const uint8_t*>(page->data);
                             nr = read_u16(page_data);
                             while (nr == 0xfffe) [[likely]] {
                                 nchars = read_u16(page_data + 2);
                                 str.append(reinterpret_cast<const char*>(page_data + 4), nchars);
-                                page_id++;
+                                ++page_id;
                                 page = column.pages[page_id];
                                 page_data = reinterpret_cast<const uint8_t*>(page->data);
                                 nr = read_u16(page_data);
@@ -318,7 +330,7 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
                             inserter_str.insert(str);
                             continue;
                         }
-                        // If the string is short, we use string_view to avoid copying it like above
+                        // if the string is short, we use string_view to avoid copying it like above
                         uint16_t end_offset_pos = offset;
                         uint16_t end_offset;
                         uint16_t start_offset;
@@ -345,22 +357,5 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
     return table;
 }
 
-ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
-    namespace views = ranges::views;
-    auto ret        = execute_impl(plan, plan.root);
-    std::vector<DataType> ret_attr_vec;
-    ret_attr_vec.reserve(plan.nodes[plan.root].output_attrs.size());
-    for (const auto& attr : plan.nodes[plan.root].output_attrs) {
-        ret_attr_vec.push_back(std::move(std::get<1>(attr)));
-    }
-    ColumnarTable table = materialize_columnar_table(plan, ret, ret_attr_vec);
-    return table;
-}
-
-void* build_context() {
-    return nullptr;
-}
-
-void destroy_context([[maybe_unused]] void* context) {}
 
 } // namespace Contest
