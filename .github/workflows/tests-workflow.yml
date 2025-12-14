@@ -4,7 +4,7 @@ name: Tests Workflow
 
 on:
   push:
-    branches: [ "late-materialization" ]
+    branches: [ "unchained-hashtable" ]
   pull_request:
     branches: [ "main" ]
 
