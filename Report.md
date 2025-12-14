@@ -3,6 +3,9 @@
 - Stavros Gkousgkounis (11152200033)
 
 # Responsibilities
+
+It is difficult to split responsibilities because we both have been involved with all parts of the code to some extent.
+
 # Fast Plans Runtime Benchmarks
 
 ## Fast, Default Implementation
@@ -128,7 +131,7 @@ Query 33c >>             Runtime: 1008 ms - Result correct: true
 Total runtime: 130090 ms
 ```
 
-## Fast with Late Materialization
+## Fast with Late Materialization (Stage 1)
 Runtime measurements captured from `./run.sh plans.json` which includes test queries `1a-33c` had a mean total runtime of `105.0` seconds.
 In detail one indicative run had the following durations:
 ```bash
@@ -250,7 +253,7 @@ Query 33c >>             Runtime: 705 ms - Result correct: true
 Total runtime: 105037 ms
 ```
 
-## Fast with Column-Store
+## Fast with Column-Store (Stage 2)
 Runtime measurements captured from `./run.sh plans.json` which includes test queries `1a-33c` had a mean total runtime of `27.7` seconds.
 In detail one indicative run had the following durations:
 ```bash
@@ -372,7 +375,7 @@ Query 33c >>             Runtime: 371 ms - Result correct: true
 Total runtime: 27747 ms
 ```
 
-## Fast with Unchained Hashtable
+## Fast with Unchained Hashtable (Stage 3)
 Runtime measurements captured from `./run.sh plans.json` which includes test queries `1a-33c` had a mean total runtime of `12.9` seconds.
 In detail one indicative run had the following durations:
 ```bash
@@ -493,24 +496,6 @@ Query 33b >>             Runtime: 42 ms - Result correct: true
 Query 33c >>             Runtime: 63 ms - Result correct: true
 Total runtime: 12902 ms
 ```
-# Conclusion
+# Benchmark conclusions
 
-The optimizations implemented in this project demonstrate significant improvements in runtime performance across various stages of the pipeline. By adhering to the exercise description and leveraging the recommended research paper, we achieved:
-
-- **Improved Efficiency**: Transitioning to columnar storage and late materialization reduced memory overhead and improved cache locality.
-- **Specialized Hash Tables**: The unchained hash table design optimized for our data layout minimized data movement and enhanced lookup performance.
-- **Incremental Validation**: Each optimization step was validated for correctness and performance, ensuring reliability.
-
-### Key Takeaways
-1. **Late Materialization**: This approach deferred string materialization until necessary, reducing unnecessary data processing.
-2. **Columnar Processing**: Organizing data into columns allowed for better vectorization and memory access patterns.
-3. **Custom Hash Tables**: Tailored hash table designs, such as the unchained hash table, demonstrated the importance of data-aware structures.
-
-### Future Work
-While the current implementation achieves substantial performance gains, further improvements could include:
-- **Parallelization**: Leveraging multi-threading to further reduce runtime.
-- **Dynamic Optimization**: Adapting data structures dynamically based on query patterns.
-- **Advanced Prefetching**: Exploring hardware-specific optimizations for memory access.
-
-In conclusion, this project highlights the importance of aligning implementation choices with data characteristics and workload requirements to achieve optimal performance.
-
+As is evident, each of the 3 optimizations led to significant speedup in our program (19.25%, 78.67%, 90.08%) respectively (measured in relation to the default runtime).
