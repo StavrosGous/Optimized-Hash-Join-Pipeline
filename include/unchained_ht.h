@@ -301,7 +301,7 @@ public:
     }
 
     void build(const column_t& col) {
-        // First pass fills directory slots' upper 48 bits with byte counts
+        // First pass fills directory slots' upper 48 bits with tuples bucket size
         for (auto &buffer : col.buffers) {
             for (auto i = 0; i < buffer.count; ++i) {
                 if (!buffer.data[i].int32_val.status) continue;
@@ -313,14 +313,14 @@ public:
             }
         }
         
-        // Second pass to compute directory slot ranges
+        // Second pass computes the starting offset of each tuples bucket
         uint64_t cur = (uint64_t)(tuples);
         for (uint64_t i = 0; i < capacity; i++) {
             uint64_t val = directory[i] >> 16;
             directory[i] = (cur << 16) | ((uint16_t)directory[i]);
             cur += val;
         }
-
+        // Third pass stores a value of the buffer to the corresponding tuples bucket in the tuples array
         size_t count = 0;
         for (size_t buf_idx = 0; buf_idx < col.buffers.size(); ++buf_idx) {
             const auto& buffer = col.buffers[buf_idx];
@@ -343,7 +343,7 @@ private:
     Entry* tuples;
     uint64_t shift;
     size_t capacity;
-
+    
     inline uint16_t computeTag(uint64_t hash) const {
         return tags[((uint32_t)hash) >> (32 - 11)];
     }

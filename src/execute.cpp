@@ -42,7 +42,7 @@ struct JoinAlgorithm {
         }
         UnchainedHashTable hash_table(build_column.num_rows);
         hash_table.build(build_column);
-
+        // Helper struct to map the output columns to the corresponding input columns once before the join
         struct OutputMapping {
             const ExecuteResult* target_side;
             size_t target_col_idx;
@@ -67,9 +67,9 @@ struct JoinAlgorithm {
                     auto [start, end] = hash_table.lookup(key);
                     for (auto entry_ptr = start; entry_ptr < end; ++entry_ptr) {
                         if (entry_ptr->key != key) continue;
-                        uint16_t buf_idx = entry_ptr->buf_idx;
-                        uint16_t idx = entry_ptr->offset;
-                        size_t build_idx = buf_idx * MAX_PER_BUFFER_ENTRY + idx;
+                            uint16_t buf_idx = entry_ptr->buf_idx;
+                            uint16_t idx = entry_ptr->offset;
+                            size_t build_idx = buf_idx * MAX_PER_BUFFER_ENTRY + idx;
                             size_t probe_global_idx = probe_idx * MAX_PER_BUFFER_ENTRY + i;
                             size_t left_row_idx = build_left ? build_idx : probe_global_idx;
                             size_t right_row_idx = build_left ? probe_global_idx : build_idx;
@@ -127,7 +127,7 @@ ExecuteResult execute_hash_join(const Plan&          plan,
 }
 
 
-
+// Function to build our column_t from Column of the ColumnarTable 
 inline void build_column_inserter(const size_t table_id, const size_t col_id, const Column& column, DataType data_type, column_t& new_column) {
     namespace views = ranges::views;
     auto& pages = column.pages;
@@ -261,12 +261,13 @@ ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
         node.data));
     return std::move(ret);
 }
-
+// Function to materialize the final ExecuteResult into the corresponding ColumnarTable
 ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& result, const std::vector<DataType>& attr_vec) {
     ColumnarTable table;
     table.num_rows = result.empty() ? 0 : result[0].num_rows;
     for (size_t col_idx = 0; col_idx < attr_vec.size(); ++col_idx) {
         Column column(attr_vec[col_idx]);
+        // We use the ColumnInserters of plan.h to build hte ColumnarTable columns 
         ColumnInserter<std::string> inserter_str{column};
         ColumnInserter<int32_t> inserter_int32{column};
         const column_t& col = result[col_idx];
@@ -298,7 +299,7 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
                         std::string_view sview{nullptr, 0};
                         uint16_t nr = read_u16(page_data);
                         uint16_t page_id = val.str_val.page_id;
-                        bool is_long = false;
+                        // If hte string is long, we build the string page by page
                         if (nr == 0xffff) {
                             uint16_t nchars = read_u16(page_data + 2);
                             str.assign(reinterpret_cast<const char*>(page_data + 4), nchars);
@@ -306,7 +307,6 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
                             page = column.pages[page_id];
                             page_data = reinterpret_cast<const uint8_t*>(page->data);
                             nr = read_u16(page_data);
-                            is_long = true;
                             while (nr == 0xfffe) [[likely]] {
                                 nchars = read_u16(page_data + 2);
                                 str.append(reinterpret_cast<const char*>(page_data + 4), nchars);
@@ -318,7 +318,7 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
                             inserter_str.insert(str);
                             continue;
                         }
-                        
+                        // If the string is short, we use string_view to avoid copying it like above
                         uint16_t end_offset_pos = offset;
                         uint16_t end_offset;
                         uint16_t start_offset;
