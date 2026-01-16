@@ -268,8 +268,7 @@ class UnchainedHashTable {
 public:
     struct Entry {
         int32_t key;
-        uint16_t buf_idx;
-        uint16_t offset;
+        uint32_t row_idx;
     };
 
     UnchainedHashTable(size_t sz) {
@@ -303,39 +302,79 @@ public:
     }
 
     void build(const column_t& col) {
-        // first pass fills directory slots' upper 48 bits with tuples bucket size
-        for (auto &buffer : col.buffers) {
-            for (auto i = 0; i < buffer.count; ++i) {
-                if (!buffer.data[i].int32_val.status) continue;
-                int32_t key = buffer.data[i].int32_val.val;
-                uint64_t hash = crc_hash(key);
-                uint64_t slot = hash >> shift; 
-                directory[slot] += sizeof(Entry) << 16;
-                directory[slot] |= tags[((uint32_t)hash) >> (32 - 11)];
+        if (col.original_col != nullptr) {
+            size_t row_idx = 0;
+            for (const auto& page : col.original_col->pages) {
+                const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
+                uint16_t nr = read_u16(page_data);
+                const int32_t* values = reinterpret_cast<const int32_t*>(page_data + 4);
+                for (uint16_t i = 0; i < nr; ++i) {
+                    int32_t key = values[i];
+                    uint64_t hash = crc_hash(key);
+                    uint64_t slot = hash >> shift;
+                    directory[slot] += sizeof(Entry) << 16;
+                    directory[slot] |= tags[((uint32_t)hash) >> (32 - 11)];
+                }
             }
-        }
-        
-        // second pass computes the starting offset of each tuples bucket
-        uint64_t cur = (uint64_t)(tuples);
-        for (uint64_t i = 0; i < capacity; i++) {
-            uint64_t val = directory[i] >> 16;
-            directory[i] = (cur << 16) | ((uint16_t)directory[i]);
-            cur += val;
-        }
-        // third pass stores a value of the buffer to the corresponding tuples bucket in the tuples array
-        size_t count = 0;
-        for (size_t buf_idx = 0; buf_idx < col.buffers.size(); ++buf_idx) {
-            const auto& buffer = col.buffers[buf_idx];
-            count += buffer.count;
-            for (auto i = 0; i < buffer.count; ++i) {
-                if (!buffer.data[i].int32_val.status) continue;
-                int32_t key = buffer.data[i].int32_val.val;
-                uint64_t slot = (crc_hash(key)) >> shift;
-                Entry* target = (Entry*)(directory[slot] >> 16);
-                target->buf_idx = static_cast<uint16_t>(buf_idx);
-                target->offset = i;
-                target->key = key;
-                directory[slot] += sizeof(Entry) << 16;
+            
+            uint64_t cur = (uint64_t)(tuples);
+            for (uint64_t i = 0; i < capacity; i++) {
+                uint64_t val = directory[i] >> 16;
+                directory[i] = (cur << 16) | ((uint16_t)directory[i]);
+                cur += val;
+            }
+            
+            for (const auto& page : col.original_col->pages) {
+                const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
+                uint16_t nr = read_u16(page_data);
+                const int32_t* values = reinterpret_cast<const int32_t*>(page_data + 4);
+                for (uint16_t i = 0; i < nr; ++i) {
+                    int32_t key = values[i];
+                    uint64_t slot = (crc_hash(key)) >> shift;
+                    Entry* target = (Entry*)(directory[slot] >> 16);
+                    target->row_idx = static_cast<uint32_t>(row_idx);
+                    target->key = key;
+                    directory[slot] += sizeof(Entry) << 16;
+                    ++row_idx;
+                }
+            }
+        } else {
+            
+            for (auto &buffer : col.buffers) {
+                for (auto i = 0; i < buffer.count; ++i) {
+                    if (!buffer.data[i].int32_val.status) continue;
+                    int32_t key = buffer.data[i].int32_val.val;
+                    uint64_t hash = crc_hash(key);
+                    uint64_t slot = hash >> shift; 
+                    directory[slot] += sizeof(Entry) << 16;
+                    directory[slot] |= tags[((uint32_t)hash) >> (32 - 11)];
+                }
+            }
+            
+            // second pass computes the starting offset of each tuples bucket
+            uint64_t cur = (uint64_t)(tuples);
+            for (uint64_t i = 0; i < capacity; i++) {
+                uint64_t val = directory[i] >> 16;
+                directory[i] = (cur << 16) | ((uint16_t)directory[i]);
+                cur += val;
+            }
+            // third pass stores entries with global row index
+            size_t global_row_idx = 0;
+            for (size_t buf_idx = 0; buf_idx < col.buffers.size(); ++buf_idx) {
+                const auto& buffer = col.buffers[buf_idx];
+                for (auto i = 0; i < buffer.count; ++i) {
+                    if (!buffer.data[i].int32_val.status) {
+                        ++global_row_idx;
+                        continue;
+                    }
+                    int32_t key = buffer.data[i].int32_val.val;
+                    uint64_t slot = (crc_hash(key)) >> shift;
+                    Entry* target = (Entry*)(directory[slot] >> 16);
+                    target->row_idx = static_cast<uint32_t>(global_row_idx);
+                    target->key = key;
+                    directory[slot] += sizeof(Entry) << 16;
+                    ++global_row_idx;
+                }
             }
         }
     }

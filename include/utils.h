@@ -92,15 +92,6 @@ struct buffer_t {
     buffer_t& operator=(const buffer_t&) = delete;
 };
 
-// i think we need a buffer_t wrapper to keep both original pages and build our buffers
-struct buffer_page_wrapper {
-    union {
-        Page* page;
-        buffer_t buffer;
-    };
-    char is_original;
-};
-
 
 struct column_t {
     std::vector<buffer_t> buffers;
