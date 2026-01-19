@@ -97,12 +97,26 @@ struct column_t {
     std::vector<buffer_t> buffers;
     size_t                num_rows;
     DataType              type;
+    
+    const Column*  original_col;  
+    uint16_t       rows_per_page; 
 
-    column_t() : num_rows(0), type(DataType::INT32) {}
-    column_t(const DataType& dt) : num_rows(0), type(dt) {}
+    column_t() : num_rows(0), type(DataType::INT32), original_col(nullptr), rows_per_page(0) {}
+    column_t(const DataType& dt) : num_rows(0), type(dt), original_col(nullptr), rows_per_page(0) {}
+    
     inline value_t get_value(size_t row_idx) const {
-        size_t buf_idx = row_idx / MAX_PER_BUFFER_ENTRY;
-        size_t buf_offset = (row_idx % MAX_PER_BUFFER_ENTRY);
-        return buffers[buf_idx].data[buf_offset];
-    } 
+        if (original_col == nullptr) {
+            size_t buf_idx = row_idx / MAX_PER_BUFFER_ENTRY;
+            size_t buf_offset = (row_idx % MAX_PER_BUFFER_ENTRY);
+            return buffers[buf_idx].data[buf_offset];
+        } else {
+            size_t page_idx = row_idx / rows_per_page;
+            size_t offset_in_page = row_idx % rows_per_page;
+            const uint8_t* page_data = reinterpret_cast<const uint8_t*>(original_col->pages[page_idx]->data);
+            value_t val;
+            val.int32_val.val = read_i32(page_data + 4 + 4 * offset_in_page);
+            val.int32_val.status = 1;
+            return val;
+        }
+    }
 };
