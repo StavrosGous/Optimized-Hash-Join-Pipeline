@@ -1,4 +1,7 @@
 #!/bin/bash
+if [ "$#" -ne 1 ]; then
+    set -- "fast_plans"
+fi
 
 if [ "$1" == "fast_plans" ]; then
     # build the fast executable using cmake
