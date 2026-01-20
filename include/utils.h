@@ -3,6 +3,14 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+
+
+#ifndef SMALL_SIZE
+#define SMALL_SIZE 4096
+#endif
+#ifndef LARGE_SIZE
+#define LARGE_SIZE 65536
+#endif
 #ifndef CAPACITY
 #define CAPACITY 64
 #endif
@@ -118,5 +126,40 @@ struct column_t {
             val.int32_val.status = 1;
             return val;
         }
+    }
+};
+
+
+struct SmallChunk {
+    SmallChunk *next = nullptr;
+    uint8_t data[SMALL_SIZE - sizeof(SmallChunk *)];
+}
+
+struct LargeChunk {
+    LargeChunk *next = nullptr;
+    uint8_t data[LARGE_SIZE - sizeof(LargeChunk *)];
+}
+
+class BumpAllocator {
+    uint8_t *current = nullptr;
+    uint8_t *end = nullptr;
+    SmallChunk *chunks = nullptr;
+
+public:
+    size_t free_space() {
+        return end - current;
+    }
+    void add_space(SmallChunk *chunk) {
+        chunk->next = chunks;
+        chunks = chunk;
+        current = chunk->data;
+        end = current + (SMALL_SIZE - sizeof(SmallChunk *));
+    }
+
+    template<typename T>
+    T* allocate() {
+        T* ptr = reinterpret_cast<T*>(current);
+        current += sizeof(T);
+        return ptr;
     }
 };
