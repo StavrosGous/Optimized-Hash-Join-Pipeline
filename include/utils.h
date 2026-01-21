@@ -16,10 +16,10 @@
 #define CAPACITY 64
 #endif
 #ifndef NUM_PARTITIONS
-#define NUM_PARTITIONS 64
+#define NUM_PARTITIONS 8
 #endif
 #ifndef LOG2_NUM_PARTITIONS
-#define LOG2_NUM_PARTITIONS 6 
+#define LOG2_NUM_PARTITIONS 3
 #endif
 #include "plan.h"
 #include "attribute.h"
@@ -156,22 +156,6 @@ class BumpAllocator {
 public:
     ChunkType *get_chunks() {
         return chunks;
-    }
-
-    void merge_chunks(ChunkType *other_chunks) {
-        if (other_chunks == nullptr) return;
-        if (chunks == nullptr) {
-            chunks = other_chunks;
-        } 
-        else {
-            ChunkType *tail = other_chunks;
-            while (tail->next != nullptr) {
-                tail = tail->next;
-            }
-            tail->next = chunks;
-            chunks = other_chunks;
-        }
-
     }
 
     size_t free_space() {

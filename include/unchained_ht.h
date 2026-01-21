@@ -273,7 +273,7 @@ public:
         uint32_t row_idx;
     };
 
-    void build_parallel(const column_t& col, size_t num_threads) {
+    void build_parallel(const column_t& col, size_t num_threads = std::thread::hardware_concurrency()) {
         size_t total_tuples = col.num_rows;
 
         constexpr size_t ENTRY_SIZE = sizeof(Entry);
@@ -298,8 +298,7 @@ public:
             thread_states[t] = new ThreadLocalState(global_alloc);
         }
 
-        // -- collect tuples phase --
-
+        // split to partitions & count tuples
         size_t tuples_per_thread = (total_tuples + num_threads - 1) / num_threads;
         
         std::vector<std::thread> threads;
@@ -316,7 +315,6 @@ public:
                     int32_t key = val.int32_val.val;
                     uint64_t hash = crc_hash(key);
 
-
                     ThreadLocalState* tls = thread_states[t];
                     Entry* entry = tls->consume<Entry>(hash);
                     entry->key = key;
@@ -330,8 +328,75 @@ public:
         }
         threads.clear();
 
+
+        size_t count_total[NUM_PARTITIONS] = {0};
+        for (size_t p = 0; p < NUM_PARTITIONS; ++p) {
+            for (size_t t = 0; t < num_threads; ++t) {
+                count_total[p] += thread_states[t]->counts[p];
+            }   
+        }
+
+        std::vector<size_t> partition_offsets(NUM_PARTITIONS + 1);
+        partition_offsets[0] = 0;
+        for (size_t p = 0; p < NUM_PARTITIONS; ++p) {
+            partition_offsets[p + 1] = partition_offsets[p] + count_total[p];
+        }
+
+        // create per-partition tuple arrays
+        std::vector<std::vector<Entry>> partitionTuples(NUM_PARTITIONS);
+        for (size_t p = 0; p < NUM_PARTITIONS; ++p) {
+            partitionTuples[p].reserve(count_total[p]);
+        }
+
+        constexpr size_t ENTRIES_PER_CHUNK = (SMALL_SIZE - sizeof(SmallChunk*)) / sizeof(Entry);
+        for (size_t t = 0; t < num_threads; ++t) {
+            for (size_t p = 0; p < NUM_PARTITIONS; ++p) {
+                size_t total = thread_states[t]->counts[p];
+                if (total == 0) continue;
+                
+                SmallChunk* chunk = thread_states[t]->level3[p].get_chunks();
+                size_t first_chunk_entries = total % ENTRIES_PER_CHUNK;
+                if (first_chunk_entries == 0) first_chunk_entries = ENTRIES_PER_CHUNK;
+                
+                size_t remaining = total;
+                bool is_first = true;
+                
+                while (chunk != nullptr && remaining > 0) {
+                    Entry* entries = reinterpret_cast<Entry*>(chunk->data);
+                    size_t count = is_first ? first_chunk_entries : ENTRIES_PER_CHUNK;
+                    count = std::min(count, remaining);
+                    
+                    for (size_t i = 0; i < count; ++i) {
+                        partitionTuples[p].push_back(entries[i]);
+                    }
+                    
+                    remaining -= count;
+                    is_first = false;
+                    chunk = chunk->next;
+                }
+            }
+        }
+
         for (size_t t = 0; t < num_threads; ++t) {
             delete thread_states[t];
+        }
+
+        // postProcessBuild
+        size_t partitions_per_thread = (NUM_PARTITIONS + num_threads - 1) / num_threads;
+        
+        for (size_t t = 0; t < num_threads; ++t) {
+            size_t start_partition = t * partitions_per_thread;
+            size_t end_partition = std::min(start_partition + partitions_per_thread, (size_t)NUM_PARTITIONS);
+            
+            threads.emplace_back([this, &partitionTuples, &partition_offsets, start_partition, end_partition]() {
+                for (size_t p = start_partition; p < end_partition; ++p) {
+                    postProcessBuild(p, partition_offsets[p], partitionTuples[p]);
+                }
+            });
+        }
+
+        for (auto& thread : threads) {
+            thread.join();
         }
     };
 
@@ -452,5 +517,32 @@ private:
     inline bool couldContain(const uint16_t entry, const uint64_t hash) const {
         uint16_t tag = tags[((uint32_t)hash) >> (32 - 11) /*shr*/ ]; // mov
         return !(tag & ~entry); // andn
+    }
+
+    void postProcessBuild(uint64_t partition, uint64_t prevCount, std::vector<Entry>& partitionTuples) {
+        for (Entry& tuple : partitionTuples) {
+            uint64_t hash = crc_hash(tuple.key);
+            uint64_t slot = hash >> shift;
+            directory[slot] += sizeof(Entry) << 16;
+            directory[slot] |= tags[((uint32_t)hash) >> (32 - 11)];
+        }
+
+        uint64_t cur = reinterpret_cast<uint64_t>(tuples + prevCount);
+        uint64_t k = 64 - shift;
+        uint64_t start = (partition << k) / NUM_PARTITIONS;
+        uint64_t end = ((partition + 1) << k) / NUM_PARTITIONS;
+        for (uint64_t i = start; i < end; ++i) {
+            uint64_t val = directory[i] >> 16;
+            directory[i] = (cur << 16) | ((uint16_t)directory[i]);
+            cur += val;
+        }
+
+        for (Entry& tuple : partitionTuples) {
+            uint64_t hash = crc_hash(tuple.key);
+            uint64_t slot = hash >> shift;
+            Entry* target = reinterpret_cast<Entry*>(directory[slot] >> 16);
+            *target = tuple;
+            directory[slot] += sizeof(Entry) << 16;
+        }
     }
 };
