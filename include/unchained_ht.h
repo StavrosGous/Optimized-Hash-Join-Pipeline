@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <utility>
+#include <thread>
+#include <algorithm> 
 #include "utils.h"
 
 const uint16_t tags[2048] = {   // Precalculated 4 bit Bloom filter tags + padding
@@ -269,6 +271,68 @@ public:
     struct Entry {
         int32_t key;
         uint32_t row_idx;
+    };
+
+    void build_parallel(const column_t& col, size_t num_threads) {
+        size_t total_tuples = col.num_rows;
+
+        constexpr size_t ENTRY_SIZE = sizeof(Entry);
+        constexpr size_t SMALL_DATA = SMALL_SIZE;
+        constexpr size_t LARGE_DATA = LARGE_SIZE;
+        constexpr size_t SMALLS_PER_LARGE = LARGE_DATA / SMALL_SIZE;
+        constexpr size_t TUPLES_PER_SMALL = SMALL_DATA / ENTRY_SIZE;
+        constexpr size_t TUPLES_PER_LARGE = TUPLES_PER_SMALL * SMALLS_PER_LARGE;
+
+
+        size_t base_chunks = (total_tuples + TUPLES_PER_LARGE - 1) / TUPLES_PER_LARGE;
+        size_t overhead_chunks = num_threads * ((NUM_PARTITIONS * SMALL_DATA + LARGE_DATA - 1) / LARGE_DATA + 1);
+        size_t num_large_chunks = base_chunks + overhead_chunks;
+
+        GlobalAllocator global_alloc;
+
+        global_alloc.reserve(num_large_chunks);
+
+        std::vector<ThreadLocalState *> thread_states(num_threads);
+
+        for (int t = 0; t < num_threads; ++t) {
+            thread_states[t] = new ThreadLocalState(global_alloc);
+        }
+
+        // -- collect tuples phase --
+
+        size_t tuples_per_thread = (total_tuples + num_threads - 1) / num_threads;
+        
+        std::vector<std::thread> threads;
+
+        for (size_t t = 0; t < num_threads; ++t) {
+            size_t start_idx = t * tuples_per_thread;
+            size_t end_idx = std::min(start_idx + tuples_per_thread, total_tuples);
+
+            threads.emplace_back([&col, &thread_states, t, start_idx, end_idx]() {
+                for (size_t row_idx = start_idx; row_idx < end_idx; ++row_idx) {
+                    value_t val = col.get_value(row_idx);
+                    if (!val.int32_val.status) continue;
+
+                    int32_t key = val.int32_val.val;
+                    uint64_t hash = crc_hash(key);
+
+
+                    ThreadLocalState* tls = thread_states[t];
+                    Entry* entry = tls->consume<Entry>(hash);
+                    entry->key = key;
+                    entry->row_idx = static_cast<uint32_t>(row_idx);
+                }
+            });
+        }
+
+        for (auto& thread : threads) {
+            thread.join();
+        }
+        threads.clear();
+
+        for (size_t t = 0; t < num_threads; ++t) {
+            delete thread_states[t];
+        }
     };
 
     UnchainedHashTable(size_t sz) {
