@@ -4,6 +4,8 @@
 #include <iostream>
 #include <cmath>
 #include <string_view>
+#include <thread>
+#include <vector>
 #include "unchained_ht.h"
 
 
@@ -25,22 +27,22 @@ struct JoinAlgorithm {
     auto run() {
         namespace views = ranges::views;
         
-        ExecuteResult temp_results;
-        temp_results.resize(output_attrs.size());
-
         const auto& left_col_val = left[left_col];
         const auto& right_col_val = right[right_col];
-        // Use num_rows for empty check (works for both direct and buffered modes)
+
         if (left_col_val.num_rows == 0 || right_col_val.num_rows == 0) {
             results.resize(output_attrs.size());
             return;
         }
-        // build left is now calculated based on the smaller column (as stated in paper)
+
         bool build_left = (left_col_val.num_rows <= right_col_val.num_rows);
         auto const &build_column = build_left ? left_col_val : right_col_val;
         auto const &probe_column = build_left ? right_col_val : left_col_val;
+
+        // build hash_table
         UnchainedHashTable hash_table(build_column.num_rows);
         hash_table.build_parallel(build_column);
+        
         // helper struct to map the output columns to the corresponding input columns once before the join
         struct OutputMapping {
             const ExecuteResult* target_side; // pointer to either left or right target side
@@ -58,70 +60,166 @@ struct JoinAlgorithm {
             }
         }
 
+        size_t num_threads = std::thread::hardware_concurrency();
+        if (num_threads == 0) num_threads = 4;
+        
+        std::vector<ExecuteResult> thread_results(num_threads);
+        for (size_t t = 0; t < num_threads; ++t) {
+            thread_results[t].resize(output_attrs.size());
+        }
+
         if (probe_column.original_col != nullptr) {
-            size_t probe_global_idx = 0;
-            for (const auto& page : probe_column.original_col->pages) {
-                const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
+            const auto& pages = probe_column.original_col->pages;
+            size_t num_pages = pages.size();
+            
+            std::vector<size_t> page_start_indices(num_pages + 1);
+            page_start_indices[0] = 0;
+            for (size_t p = 0; p < num_pages; ++p) {
+                const uint8_t* page_data = reinterpret_cast<const uint8_t*>(pages[p]->data);
                 uint16_t nr = read_u16(page_data);
-                const int32_t* values = reinterpret_cast<const int32_t*>(page_data + 4);
-                for (uint16_t i = 0; i < nr; ++i) {
-                    int32_t key = values[i];
-                    auto [start, end] = hash_table.lookup(key);
-                    for (auto entry_ptr = start; entry_ptr < end; ++entry_ptr) {
-                        if (entry_ptr->key != key) continue;
-                        size_t build_idx = entry_ptr->row_idx;
-                        size_t left_row_idx = build_left ? build_idx : probe_global_idx;
-                        size_t right_row_idx = build_left ? probe_global_idx : build_idx;
-                        for (size_t out_idx = 0; out_idx < mappings.size(); ++out_idx) {
-                            const auto& mapping = mappings[out_idx];
-                            size_t target_row_idx = mapping.use_left ? left_row_idx : right_row_idx;
-                            const auto& side = (*mapping.target_side)[mapping.col_idx];
-                            value_t val = side.get_value(target_row_idx);
-                            auto& res_col = temp_results[out_idx];
-                            if (res_col.buffers.empty() || (res_col.buffers.back().count == MAX_PER_BUFFER_ENTRY)) {
-                                res_col.buffers.emplace_back();
+                page_start_indices[p + 1] = page_start_indices[p] + nr;
+            }
+            
+            size_t pages_per_thread = (num_pages + num_threads - 1) / num_threads;
+            
+            std::vector<std::thread> threads;
+            for (size_t t = 0; t < num_threads; ++t) {
+                size_t start_page = t * pages_per_thread;
+                size_t end_page = std::min(start_page + pages_per_thread, num_pages);
+                
+                threads.emplace_back([&, t, start_page, end_page]() {
+                    ExecuteResult& local_results = thread_results[t];
+                    
+                    for (size_t page_idx = start_page; page_idx < end_page; ++page_idx) {
+                        
+                        const uint8_t* page_data = reinterpret_cast<const uint8_t*>(pages[page_idx]->data);
+                        uint16_t nr = read_u16(page_data);
+                        const int32_t* values = reinterpret_cast<const int32_t*>(page_data + 4);
+                        size_t base_idx = page_start_indices[page_idx];
+                        
+                        for (uint16_t i = 0; i < nr; ++i) {
+                            int32_t key = values[i];
+                            auto [start, end] = hash_table.lookup(key);
+                            for (auto entry_ptr = start; entry_ptr < end; ++entry_ptr) {
+                                if (entry_ptr->key != key) continue;
+                                size_t build_idx = entry_ptr->row_idx;
+                                size_t probe_global_idx = base_idx + i;
+                                size_t left_row_idx = build_left ? build_idx : probe_global_idx;
+                                size_t right_row_idx = build_left ? probe_global_idx : build_idx;
+                                
+                                for (size_t out_idx = 0; out_idx < mappings.size(); ++out_idx) {
+                                    const auto& mapping = mappings[out_idx];
+                                    size_t target_row_idx = mapping.use_left ? left_row_idx : right_row_idx;
+                                    const auto& side = (*mapping.target_side)[mapping.col_idx];
+                                    value_t val = side.get_value(target_row_idx);
+                                    
+                                    auto& res_col = local_results[out_idx];
+                                    if (res_col.buffers.empty() || (res_col.buffers.back().count == MAX_PER_BUFFER_ENTRY)) {
+                                        res_col.buffers.emplace_back();
+                                    }
+                                    auto& last_buf = res_col.buffers.back();
+                                    last_buf.data[last_buf.count++] = std::move(val);
+                                    ++res_col.num_rows;
+                                }
                             }
-                            auto& last_buf = res_col.buffers.back();
-                            last_buf.data[last_buf.count++] = std::move(val);
-                            ++res_col.num_rows;
                         }
                     }
-                    ++probe_global_idx;
-                }
+                });
+            }
+            
+            for (auto& thread : threads) {
+                thread.join();
             }
         } else {
-            for (auto [probe_idx, probe_buffer] : probe_column.buffers | views::enumerate) {
-                for (size_t i = 0; i < probe_buffer.count; ++i) {
-                    value_t probe_val = probe_buffer.data[i];
-                    int32_t key = probe_val.int32_val.val;
-                    if (probe_val.int32_val.status) {
-                        auto [start, end] = hash_table.lookup(key);
-                        for (auto entry_ptr = start; entry_ptr < end; ++entry_ptr) {
-                            if (entry_ptr->key != key) continue;
-                            size_t build_idx = entry_ptr->row_idx;
-                            size_t probe_global_idx = probe_idx * MAX_PER_BUFFER_ENTRY + i;
-                            size_t left_row_idx = build_left ? build_idx : probe_global_idx;
-                            size_t right_row_idx = build_left ? probe_global_idx : build_idx;
-                            for (size_t out_idx = 0; out_idx < mappings.size(); ++out_idx) {
-                                const auto& mapping = mappings[out_idx];
-                                size_t target_row_idx = mapping.use_left ? left_row_idx : right_row_idx;
-                                const auto& side = (*mapping.target_side)[mapping.col_idx];
-                                value_t val = side.get_value(target_row_idx);
+            size_t num_buffers = probe_column.buffers.size();
+            
+            size_t buffers_per_thread = (num_buffers + num_threads - 1) / num_threads;
+            
+            std::vector<std::thread> threads;
+            for (size_t t = 0; t < num_threads; ++t) {
+                size_t start_buf = t * buffers_per_thread;
+                size_t end_buf = std::min(start_buf + buffers_per_thread, num_buffers);
+                
+                threads.emplace_back([&, t, start_buf, end_buf]() {
+                    ExecuteResult& local_results = thread_results[t];
+                    
+                    for (size_t buf_idx = start_buf; buf_idx < end_buf; ++buf_idx) {
+                        
+                        const auto& probe_buffer = probe_column.buffers[buf_idx];
+                        for (size_t i = 0; i < probe_buffer.count; ++i) {
+                            value_t probe_val = probe_buffer.data[i];
+                            int32_t key = probe_val.int32_val.val;
+                            if (probe_val.int32_val.status) {
+                                auto [start, end] = hash_table.lookup(key);
+                                for (auto entry_ptr = start; entry_ptr < end; ++entry_ptr) {
+                                    if (entry_ptr->key != key) continue;
+                                    size_t build_idx = entry_ptr->row_idx;
+                                    size_t probe_global_idx = buf_idx * MAX_PER_BUFFER_ENTRY + i;
+                                    size_t left_row_idx = build_left ? build_idx : probe_global_idx;
+                                    size_t right_row_idx = build_left ? probe_global_idx : build_idx;
+                                    
+                                    for (size_t out_idx = 0; out_idx < mappings.size(); ++out_idx) {
+                                        const auto& mapping = mappings[out_idx];
+                                        size_t target_row_idx = mapping.use_left ? left_row_idx : right_row_idx;
+                                        const auto& side = (*mapping.target_side)[mapping.col_idx];
+                                        value_t val = side.get_value(target_row_idx);
 
-                                auto& res_col = temp_results[out_idx];
-                                if (res_col.buffers.empty() || (res_col.buffers.back().count == MAX_PER_BUFFER_ENTRY)) {
-                                    res_col.buffers.emplace_back();
+                                        auto& res_col = local_results[out_idx];
+                                        if (res_col.buffers.empty() || (res_col.buffers.back().count == MAX_PER_BUFFER_ENTRY)) {
+                                            res_col.buffers.emplace_back();
+                                        }
+                                        auto& last_buf = res_col.buffers.back();
+                                        last_buf.data[last_buf.count++] = std::move(val);
+                                        ++res_col.num_rows;
+                                    }
                                 }
-                                auto& last_buf = res_col.buffers.back();
-                                last_buf.data[last_buf.count++] = std::move(val);
-                                ++res_col.num_rows;
                             }
                         }
                     }
-                }
+                });
+            }
+            
+            for (auto& thread : threads) {
+                thread.join();
             }
         }
-        results = std::move(temp_results);
+        
+        ExecuteResult final_results;
+        final_results.resize(output_attrs.size());
+        
+        for (size_t out_idx = 0; out_idx < output_attrs.size(); ++out_idx) {
+            size_t total_rows = 0;
+            for (size_t t = 0; t < num_threads; ++t) {
+                total_rows += thread_results[t][out_idx].num_rows;
+            }
+            
+            if (total_rows == 0) {
+                continue;
+            }
+            
+            buffer_t current_buf;
+            
+            for (size_t t = 0; t < num_threads; ++t) {
+                auto& thread_col = thread_results[t][out_idx];
+                for (auto& buf : thread_col.buffers) {
+                    for (size_t i = 0; i < buf.count; ++i) {
+                        if (current_buf.count == MAX_PER_BUFFER_ENTRY) {
+                            final_results[out_idx].buffers.push_back(std::move(current_buf));
+                            current_buf = buffer_t{};
+                        }
+                        current_buf.data[current_buf.count++] = buf.data[i];
+                    }
+                }
+            }
+            
+            if (current_buf.count > 0) {
+                final_results[out_idx].buffers.push_back(std::move(current_buf));
+            }
+            
+            final_results[out_idx].num_rows = total_rows;
+        }
+        
+        results = std::move(final_results);
     }
 };
 
@@ -155,6 +253,7 @@ ExecuteResult execute_hash_join(const Plan&          plan,
 ExecuteResult execute_scan(const Plan&               plan,
     const ScanNode&                                  scan,
     const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
+    
     auto                           table_id = scan.base_table_id;
     auto&                          input    = plan.inputs[table_id];
     ExecuteResult                results(output_attrs.size());
