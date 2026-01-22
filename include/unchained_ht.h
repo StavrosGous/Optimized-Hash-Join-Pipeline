@@ -5,6 +5,8 @@
 #include <utility>
 #include <thread>
 #include <algorithm> 
+#include <chrono>
+#include <iostream>
 #include "utils.h"
 
 const uint16_t tags[2048] = {   // Precalculated 4 bit Bloom filter tags + padding
@@ -326,8 +328,8 @@ public:
         for (auto& thread : threads) {
             thread.join();
         }
-        threads.clear();
 
+        threads.clear();
 
         size_t count_total[NUM_PARTITIONS] = {0};
         for (size_t p = 0; p < NUM_PARTITIONS; ++p) {
@@ -342,61 +344,27 @@ public:
             partition_offsets[p + 1] = partition_offsets[p] + count_total[p];
         }
 
-        // create per-partition tuple arrays
-        std::vector<std::vector<Entry>> partitionTuples(NUM_PARTITIONS);
-        for (size_t p = 0; p < NUM_PARTITIONS; ++p) {
-            partitionTuples[p].reserve(count_total[p]);
-        }
-
-        constexpr size_t ENTRIES_PER_CHUNK = (SMALL_SIZE - sizeof(SmallChunk*)) / sizeof(Entry);
-        for (size_t t = 0; t < num_threads; ++t) {
-            for (size_t p = 0; p < NUM_PARTITIONS; ++p) {
-                size_t total = thread_states[t]->counts[p];
-                if (total == 0) continue;
-                
-                SmallChunk* chunk = thread_states[t]->level3[p].get_chunks();
-                size_t first_chunk_entries = total % ENTRIES_PER_CHUNK;
-                if (first_chunk_entries == 0) first_chunk_entries = ENTRIES_PER_CHUNK;
-                
-                size_t remaining = total;
-                bool is_first = true;
-                
-                while (chunk != nullptr && remaining > 0) {
-                    Entry* entries = reinterpret_cast<Entry*>(chunk->data);
-                    size_t count = is_first ? first_chunk_entries : ENTRIES_PER_CHUNK;
-                    count = std::min(count, remaining);
-                    
-                    for (size_t i = 0; i < count; ++i) {
-                        partitionTuples[p].push_back(entries[i]);
-                    }
-                    
-                    remaining -= count;
-                    is_first = false;
-                    chunk = chunk->next;
-                }
-            }
-        }
-
-        for (size_t t = 0; t < num_threads; ++t) {
-            delete thread_states[t];
-        }
-
-        // postProcessBuild
+        // postProcessBuild with direct chunk traversal
         size_t partitions_per_thread = (NUM_PARTITIONS + num_threads - 1) / num_threads;
         
         for (size_t t = 0; t < num_threads; ++t) {
             size_t start_partition = t * partitions_per_thread;
             size_t end_partition = std::min(start_partition + partitions_per_thread, (size_t)NUM_PARTITIONS);
             
-            threads.emplace_back([this, &partitionTuples, &partition_offsets, start_partition, end_partition]() {
+            threads.emplace_back([this, &thread_states, &partition_offsets, start_partition, end_partition, num_threads]() {
                 for (size_t p = start_partition; p < end_partition; ++p) {
-                    postProcessBuild(p, partition_offsets[p], partitionTuples[p]);
+                    postProcessBuild(p, partition_offsets[p], thread_states, num_threads);
                 }
             });
         }
 
         for (auto& thread : threads) {
             thread.join();
+        }
+
+        // Clean up thread states after postProcessBuild completes
+        for (size_t t = 0; t < num_threads; ++t) {
+            delete thread_states[t];
         }
     };
 
@@ -430,84 +398,6 @@ public:
         return {start, end};
     }
 
-    void build(const column_t& col) {
-        if (col.original_col != nullptr) {
-            size_t row_idx = 0;
-            for (const auto& page : col.original_col->pages) {
-                const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
-                uint16_t nr = read_u16(page_data);
-                const int32_t* values = reinterpret_cast<const int32_t*>(page_data + 4);
-                for (uint16_t i = 0; i < nr; ++i) {
-                    int32_t key = values[i];
-                    uint64_t hash = crc_hash(key);
-                    uint64_t slot = hash >> shift;
-                    directory[slot] += sizeof(Entry) << 16;
-                    directory[slot] |= tags[((uint32_t)hash) >> (32 - 11)];
-                }
-            }
-            
-            uint64_t cur = (uint64_t)(tuples);
-            for (uint64_t i = 0; i < capacity; i++) {
-                uint64_t val = directory[i] >> 16;
-                directory[i] = (cur << 16) | ((uint16_t)directory[i]);
-                cur += val;
-            }
-            
-            for (const auto& page : col.original_col->pages) {
-                const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
-                uint16_t nr = read_u16(page_data);
-                const int32_t* values = reinterpret_cast<const int32_t*>(page_data + 4);
-                for (uint16_t i = 0; i < nr; ++i) {
-                    int32_t key = values[i];
-                    uint64_t slot = (crc_hash(key)) >> shift;
-                    Entry* target = (Entry*)(directory[slot] >> 16);
-                    target->row_idx = static_cast<uint32_t>(row_idx);
-                    target->key = key;
-                    directory[slot] += sizeof(Entry) << 16;
-                    ++row_idx;
-                }
-            }
-        } else {
-            
-            for (auto &buffer : col.buffers) {
-                for (auto i = 0; i < buffer.count; ++i) {
-                    if (!buffer.data[i].int32_val.status) continue;
-                    int32_t key = buffer.data[i].int32_val.val;
-                    uint64_t hash = crc_hash(key);
-                    uint64_t slot = hash >> shift; 
-                    directory[slot] += sizeof(Entry) << 16;
-                    directory[slot] |= tags[((uint32_t)hash) >> (32 - 11)];
-                }
-            }
-            
-            // second pass computes the starting offset of each tuples bucket
-            uint64_t cur = (uint64_t)(tuples);
-            for (uint64_t i = 0; i < capacity; i++) {
-                uint64_t val = directory[i] >> 16;
-                directory[i] = (cur << 16) | ((uint16_t)directory[i]);
-                cur += val;
-            }
-            // third pass stores entries with global row index
-            size_t global_row_idx = 0;
-            for (size_t buf_idx = 0; buf_idx < col.buffers.size(); ++buf_idx) {
-                const auto& buffer = col.buffers[buf_idx];
-                for (auto i = 0; i < buffer.count; ++i) {
-                    if (!buffer.data[i].int32_val.status) {
-                        ++global_row_idx;
-                        continue;
-                    }
-                    int32_t key = buffer.data[i].int32_val.val;
-                    uint64_t slot = (crc_hash(key)) >> shift;
-                    Entry* target = (Entry*)(directory[slot] >> 16);
-                    target->row_idx = static_cast<uint32_t>(global_row_idx);
-                    target->key = key;
-                    directory[slot] += sizeof(Entry) << 16;
-                    ++global_row_idx;
-                }
-            }
-        }
-    }
-
 private:
     uint64_t* directory;
     Entry* tuples;
@@ -519,12 +409,45 @@ private:
         return !(tag & ~entry); // andn
     }
 
-    void postProcessBuild(uint64_t partition, uint64_t prevCount, std::vector<Entry>& partitionTuples) {
-        for (Entry& tuple : partitionTuples) {
-            uint64_t hash = crc_hash(tuple.key);
-            uint64_t slot = hash >> shift;
-            directory[slot] += sizeof(Entry) << 16;
-            directory[slot] |= tags[((uint32_t)hash) >> (32 - 11)];
+    static constexpr size_t ENTRIES_PER_CHUNK = (SMALL_SIZE - sizeof(SmallChunk*)) / sizeof(Entry);
+
+    // Helper to iterate over entries in a partition from a single thread's slab
+    template<typename Func>
+    void forEachEntryInPartition(ThreadLocalState* tls, size_t partition, Func&& func) {
+        size_t total = tls->counts[partition];
+        if (total == 0) return;
+        
+        SmallChunk* chunk = tls->level3[partition].get_chunks();
+        size_t first_chunk_entries = total % ENTRIES_PER_CHUNK;
+        if (first_chunk_entries == 0) first_chunk_entries = ENTRIES_PER_CHUNK;
+        
+        size_t remaining = total;
+        bool is_first = true;
+        
+        while (chunk != nullptr && remaining > 0) {
+            Entry* entries = reinterpret_cast<Entry*>(chunk->data);
+            size_t count = is_first ? first_chunk_entries : ENTRIES_PER_CHUNK;
+            count = std::min(count, remaining);
+            
+            for (size_t i = 0; i < count; ++i) {
+                func(entries[i]);
+            }
+            
+            remaining -= count;
+            is_first = false;
+            chunk = chunk->next;
+        }
+    }
+
+    void postProcessBuild(uint64_t partition, uint64_t prevCount, 
+                                 std::vector<ThreadLocalState*>& thread_states, size_t num_threads) {
+        for (size_t t = 0; t < num_threads; ++t) {
+            forEachEntryInPartition(thread_states[t], partition, [this](Entry& tuple) {
+                uint64_t hash = crc_hash(tuple.key);
+                uint64_t slot = hash >> shift;
+                directory[slot] += sizeof(Entry) << 16;
+                directory[slot] |= tags[((uint32_t)hash) >> (32 - 11)];
+            });
         }
 
         uint64_t cur = reinterpret_cast<uint64_t>(tuples + prevCount);
@@ -537,12 +460,14 @@ private:
             cur += val;
         }
 
-        for (Entry& tuple : partitionTuples) {
-            uint64_t hash = crc_hash(tuple.key);
-            uint64_t slot = hash >> shift;
-            Entry* target = reinterpret_cast<Entry*>(directory[slot] >> 16);
-            *target = tuple;
-            directory[slot] += sizeof(Entry) << 16;
+        for (size_t t = 0; t < num_threads; ++t) {
+            forEachEntryInPartition(thread_states[t], partition, [this](Entry& tuple) {
+                uint64_t hash = crc_hash(tuple.key);
+                uint64_t slot = hash >> shift;
+                Entry* target = reinterpret_cast<Entry*>(directory[slot] >> 16);
+                *target = tuple;
+                directory[slot] += sizeof(Entry) << 16;
+            });
         }
     }
 };

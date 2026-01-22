@@ -16,10 +16,10 @@
 #define CAPACITY 64
 #endif
 #ifndef NUM_PARTITIONS
-#define NUM_PARTITIONS 8
+#define NUM_PARTITIONS 64
 #endif
 #ifndef LOG2_NUM_PARTITIONS
-#define LOG2_NUM_PARTITIONS 3
+#define LOG2_NUM_PARTITIONS 6
 #endif
 #include "plan.h"
 #include "attribute.h"
