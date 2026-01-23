@@ -60,7 +60,7 @@ struct JoinAlgorithm {
             }
         }
 
-        size_t num_threads = std::thread::hardware_concurrency();
+        size_t num_threads = SPC__THREAD_COUNT;
         if (num_threads == 0) num_threads = 4;
         
         std::vector<ExecuteResult> thread_results(num_threads);

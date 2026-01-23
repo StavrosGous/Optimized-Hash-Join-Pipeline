@@ -275,7 +275,7 @@ public:
         uint32_t row_idx;
     };
 
-    void build_parallel(const column_t& col, size_t num_threads = std::thread::hardware_concurrency()) {
+    void build_parallel(const column_t& col, size_t num_threads = SPC__CORE_COUNT) {
         size_t total_tuples = col.num_rows;
 
         constexpr size_t ENTRY_SIZE = sizeof(Entry);
