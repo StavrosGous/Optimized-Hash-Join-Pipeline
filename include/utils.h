@@ -114,7 +114,8 @@ struct column_t {
     DataType              type;
     
     const Column*  original_col;  
-    uint16_t       rows_per_page; 
+    uint16_t       rows_per_page;
+    std::vector<size_t> page_rowids;
 
     column_t() : num_rows(0), type(DataType::INT32), original_col(nullptr), rows_per_page(0) {}
     column_t(const DataType& dt) : num_rows(0), type(dt), original_col(nullptr), rows_per_page(0) {}
