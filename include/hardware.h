@@ -44,9 +44,45 @@
 #define SPC__LEVEL4_CACHE_ASSOC
 #define SPC__LEVEL4_CACHE_LINESIZE
 #else
-#define SPC__CORE_COUNT 8
-#define SPC__THREAD_COUNT 8
-#define SPC__LEVEL1_DCACHE_SIZE 122880
-#define SPC__LEVEL2_CACHE_SIZE 1048576
-#define SPC__LEVEL1_DCACHE_LINESIZE 128
+// Hardware information for local development.
+
+// Architecture from `uname -srm`.
+#define SPC__X86_64
+
+// CPU from `/proc/cpuinfo`.
+#define SPC__CPU_NAME "13th Gen Intel(R) Core(TM) i7-13700K"
+
+// The servers might have multiple CPUs. We limit all benchmarks to a single node using numactl. The listed CPU numbers
+// below are for a single CPU. The listed NUMA numbers are just meant to give you a rough idea of the system.
+#define SPC__CORE_COUNT 6
+#define SPC__THREAD_COUNT 12
+
+// Obtained from `lsb_release -a`.
+#define SPC__OS "Debian GNU/Linux 13 (trixie)"
+
+// Obtained from: `uname -srm`.
+#define SPC__KERNEL "Linux 6.12.57+deb13-amd64 x86_64"
+
+// Main memory (MB).
+#define SPC__NUMA_NODE_DRAM_MB 4996
+
+// Intel: possible options are AVX, AVX2, and AVX512.
+#define SPC__SUPPORTS_AVX2
+
+// Cache information from `getconf -a | grep CACHE`.
+#define SPC__LEVEL1_ICACHE_SIZE                 32768
+#define SPC__LEVEL1_ICACHE_ASSOC
+#define SPC__LEVEL1_ICACHE_LINESIZE             64
+#define SPC__LEVEL1_DCACHE_SIZE                 49152
+#define SPC__LEVEL1_DCACHE_ASSOC                12
+#define SPC__LEVEL1_DCACHE_LINESIZE             64
+#define SPC__LEVEL2_CACHE_SIZE                  2097152
+#define SPC__LEVEL2_CACHE_ASSOC                 16
+#define SPC__LEVEL2_CACHE_LINESIZE              64
+#define SPC__LEVEL3_CACHE_SIZE                  31457280
+#define SPC__LEVEL3_CACHE_ASSOC                 12
+#define SPC__LEVEL3_CACHE_LINESIZE              64
+#define SPC__LEVEL4_CACHE_SIZE                  0
+#define SPC__LEVEL4_CACHE_ASSOC
+#define SPC__LEVEL4_CACHE_LINESIZE
 #endif
