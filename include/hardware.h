@@ -3,7 +3,6 @@
 
 #if KERNEL_VERSION == KERNEL_VERSION(6,8,0)
 // Hardware information for benchmark VM.
-// Hardware information for benchmark VM.
 
 // Architecture from `uname -srm`.
 #define SPC__X86_64
