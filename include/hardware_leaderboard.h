@@ -1,8 +1,3 @@
-#pragma once
-#include <linux/version.h>
-
-#if KERNEL_VERSION == KERNEL_VERSION(6,8,0)
-// Hardware information for benchmark VM.
 // Hardware information for benchmark VM.
 
 // Architecture from `uname -srm`.
@@ -44,10 +39,3 @@
 #define SPC__LEVEL4_CACHE_SIZE                  0
 #define SPC__LEVEL4_CACHE_ASSOC
 #define SPC__LEVEL4_CACHE_LINESIZE
-#else
-#define SPC__CORE_COUNT 8
-#define SPC__THREAD_COUNT 8
-#define SPC__LEVEL1_DCACHE_SIZE 122880
-#define SPC__LEVEL2_CACHE_SIZE 1048576
-#define SPC__LEVEL1_DCACHE_LINESIZE 128
-#endif
