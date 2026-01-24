@@ -248,7 +248,8 @@ ExecuteResult execute_scan(const Plan&               plan,
     auto                           table_id = scan.base_table_id;
     auto&                          input    = plan.inputs[table_id];
     ExecuteResult                results(output_attrs.size());
-    for (const auto& [idx, attr] : output_attrs | ranges::views::enumerate) {
+    for (size_t idx = 0; idx < output_attrs.size(); ++idx) {
+        auto& attr = output_attrs[idx];
         auto col_idx = std::get<0>(attr);
         auto& column = input.columns[col_idx];
         DataType data_type = column.type;
@@ -361,7 +362,8 @@ inline void build_column_inserter(const size_t table_id, const size_t col_id, co
         }
         case DataType::VARCHAR: {
             
-            for (const auto& [idx, page] : pages | views::enumerate) {
+            for (size_t idx = 0; idx < pages.size(); ++idx) {
+                const auto& page = pages[idx];
                 const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
                 uint16_t nr = read_u16(page_data);
 
