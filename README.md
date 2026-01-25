@@ -1,4 +1,5 @@
 ![Actions Dashboard](https://github.com/uoa-k23a/k23a-2025-d1-2-odds-1-pipeline/actions/workflows/tests-workflow.yml/badge.svg)
+![LeaderBoard Run](https://github.com/uoa-k23a/k23a-2025-d1-2-odds-1-pipeline/actions/workflows/leaderboard.yml/badge.svg)
 
 To build and run the program on plans.json do
 ```bash
