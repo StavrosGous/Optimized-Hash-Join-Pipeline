@@ -9,6 +9,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <functional>
+#include <sys/mman.h>
 
 #ifndef SMALL_SIZE
 #define SMALL_SIZE 4096
@@ -182,44 +183,87 @@ public:
 };
 
 class GlobalAllocator {
-    std::vector<LargeChunk *> large_chunks;
-    std::atomic<size_t> next_idx{0};
-public:
+    uint8_t* arena = nullptr;           // mmaped memory
+    size_t arena_size = 0;              // mmaped size (bytes)
+    size_t arena_capacity = 0;          // capacity in chunks
+    std::atomic<size_t> next_idx{0};    // next chunk allocated
+    
+    static constexpr size_t CHUNK_SIZE = sizeof(LargeChunk);
+    static constexpr size_t PAGE_SIZE_ALLOC = 4096;
 
-    void reserve(size_t num_chunks) {
-        // Only allocate new chunks if we don't have enough
-        size_t current_size = large_chunks.size();
-        for (size_t i = current_size; i < num_chunks; i++) {
-            LargeChunk *chunk = new LargeChunk();
-            large_chunks.push_back(chunk);
-        }
+public:
+    GlobalAllocator() = default;
+    
+    GlobalAllocator(GlobalAllocator&& other) noexcept 
+        : arena(other.arena), arena_size(other.arena_size),
+          arena_capacity(other.arena_capacity), next_idx(other.next_idx.load()) {
+        other.arena = nullptr;
+        other.arena_size = 0;
+        other.arena_capacity = 0;
+        other.next_idx.store(0);
     }
 
-    // Reset the allocator to reuse existing chunks
+    void reserve(size_t num_chunks) {
+        if (num_chunks <= arena_capacity) return;
+        
+        // Calculate new size (round up to page boundary)
+        size_t new_size = num_chunks * CHUNK_SIZE;
+        new_size = (new_size + PAGE_SIZE_ALLOC - 1) & ~(PAGE_SIZE_ALLOC - 1);
+        
+        // Allocate contiguous region with mmap
+        uint8_t* new_arena = static_cast<uint8_t*>(
+            mmap(nullptr, new_size, PROT_READ | PROT_WRITE, 
+                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+        
+        if (new_arena == MAP_FAILED) {
+            std::cerr << "mmap failed for " << new_size << " bytes" << std::endl;
+            return;
+        }
+        
+        size_t used_chunks = next_idx.load(std::memory_order_relaxed);
+        if (arena && used_chunks > 0) {
+            std::memcpy(new_arena, arena, used_chunks * CHUNK_SIZE);
+        }
+        
+        // Free old arena
+        if (arena) {
+            munmap(arena, arena_size);
+        }
+        
+        arena = new_arena;
+        arena_size = new_size;
+        arena_capacity = new_size / CHUNK_SIZE;
+    }
+
     void reset() {
         next_idx.store(0, std::memory_order_relaxed);
     }
 
-    LargeChunk *allocate() {
-        size_t idx = next_idx.fetch_add(1);
-        if (idx < large_chunks.size()) {
-            return large_chunks[idx];
+    LargeChunk* allocate() {
+        size_t idx = next_idx.fetch_add(1, std::memory_order_relaxed);
+        if (idx < arena_capacity) {
+            return reinterpret_cast<LargeChunk*>(arena + idx * CHUNK_SIZE);
         }
-        LargeChunk *chunk = new LargeChunk();
-        return chunk;
+        void* ptr = aligned_alloc(alignof(LargeChunk), CHUNK_SIZE);
+        return static_cast<LargeChunk*>(ptr);
     }
 
     void free_all() {
-        for (auto *chunk: large_chunks) {
-            delete chunk;
+        if (arena) {
+            munmap(arena, arena_size);
+            arena = nullptr;
         }
-        large_chunks.clear();
+        arena_size = 0;
+        arena_capacity = 0;
         next_idx.store(0, std::memory_order_relaxed);
     }
+    
     ~GlobalAllocator() {
         free_all();
     }
-
+    
+    GlobalAllocator(const GlobalAllocator&) = delete;
+    GlobalAllocator& operator=(const GlobalAllocator&) = delete;
 };
 
 
@@ -310,7 +354,7 @@ public:
         
         lock.lock();
         cv_done.wait(lock, [this] { return active_count.load(std::memory_order_acquire) == 0; });
-        lock.unlock(); // unnecessary but better for readability
+        lock.unlock();
     }
 
     size_t get_num_threads() const { return num_threads; }
