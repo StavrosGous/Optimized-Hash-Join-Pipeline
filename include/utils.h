@@ -280,9 +280,9 @@ public:
     }
 
     ~ThreadPool() {
-        std::lock_guard<std::mutex> lock(mtx);
+        std::unique_lock<std::mutex> lock(mtx);
         shutdown = true;
-        
+        lock.unlock();
         cv_start.notify_all();
         for (auto& w : workers) {
             w.join();
@@ -291,16 +291,17 @@ public:
 
 
     void run_parallel(std::function<void(size_t)> task_func) {
-        std::lock_guard<std::mutex> lock(mtx);
+        std::unique_lock<std::mutex> lock(mtx);
         task = std::move(task_func);
         active_count.store(num_threads, std::memory_order_release);
         ++generation;
+        lock.unlock();
         
         cv_start.notify_all();
         
-        std::unique_lock<std::mutex> lock(mtx);
+        lock.lock();
         cv_done.wait(lock, [this] { return active_count.load(std::memory_order_acquire) == 0; });
-        
+        lock.unlock(); // unnecessary but better for readability
     }
 
     size_t get_num_threads() const { return num_threads; }
