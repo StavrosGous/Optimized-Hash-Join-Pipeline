@@ -30,7 +30,8 @@ struct JoinAlgorithm {
 
         const auto& left_col_val = left[left_col];
         const auto& right_col_val = right[right_col];
-        if (left_col_val.buffers.empty() || right_col_val.buffers.empty()) {
+        // Use num_rows for empty check (works for both direct and buffered modes)
+        if (left_col_val.num_rows == 0 || right_col_val.num_rows == 0) {
             results.resize(output_attrs.size());
             return;
         }
@@ -57,17 +58,47 @@ struct JoinAlgorithm {
             }
         }
 
-        for (auto [probe_idx, probe_buffer] : probe_column.buffers | views::enumerate) {
-            for (size_t i = 0; i < probe_buffer.count; ++i) {
-                value_t probe_val = probe_buffer.data[i];
-                int32_t key = probe_val.int32_val.val;
-                if (probe_val.int32_val.status) {
+        if (probe_column.original_col != nullptr) {
+            size_t probe_global_idx = 0;
+            for (const auto& page : probe_column.original_col->pages) {
+                const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
+                uint16_t nr = read_u16(page_data);
+                const int32_t* values = reinterpret_cast<const int32_t*>(page_data + 4);
+                for (uint16_t i = 0; i < nr; ++i) {
+                    int32_t key = values[i];
                     auto [start, end] = hash_table.lookup(key);
                     for (auto entry_ptr = start; entry_ptr < end; ++entry_ptr) {
                         if (entry_ptr->key != key) continue;
-                            uint16_t buf_idx = entry_ptr->buf_idx;
-                            uint16_t idx = entry_ptr->offset;
-                            size_t build_idx = buf_idx * MAX_PER_BUFFER_ENTRY + idx;
+                        size_t build_idx = entry_ptr->row_idx;
+                        size_t left_row_idx = build_left ? build_idx : probe_global_idx;
+                        size_t right_row_idx = build_left ? probe_global_idx : build_idx;
+                        for (size_t out_idx = 0; out_idx < mappings.size(); ++out_idx) {
+                            const auto& mapping = mappings[out_idx];
+                            size_t target_row_idx = mapping.use_left ? left_row_idx : right_row_idx;
+                            const auto& side = (*mapping.target_side)[mapping.col_idx];
+                            value_t val = side.get_value(target_row_idx);
+                            auto& res_col = temp_results[out_idx];
+                            if (res_col.buffers.empty() || (res_col.buffers.back().count == MAX_PER_BUFFER_ENTRY)) {
+                                res_col.buffers.emplace_back();
+                            }
+                            auto& last_buf = res_col.buffers.back();
+                            last_buf.data[last_buf.count++] = std::move(val);
+                            ++res_col.num_rows;
+                        }
+                    }
+                    ++probe_global_idx;
+                }
+            }
+        } else {
+            for (auto [probe_idx, probe_buffer] : probe_column.buffers | views::enumerate) {
+                for (size_t i = 0; i < probe_buffer.count; ++i) {
+                    value_t probe_val = probe_buffer.data[i];
+                    int32_t key = probe_val.int32_val.val;
+                    if (probe_val.int32_val.status) {
+                        auto [start, end] = hash_table.lookup(key);
+                        for (auto entry_ptr = start; entry_ptr < end; ++entry_ptr) {
+                            if (entry_ptr->key != key) continue;
+                            size_t build_idx = entry_ptr->row_idx;
                             size_t probe_global_idx = probe_idx * MAX_PER_BUFFER_ENTRY + i;
                             size_t left_row_idx = build_left ? build_idx : probe_global_idx;
                             size_t right_row_idx = build_left ? probe_global_idx : build_idx;
@@ -75,12 +106,7 @@ struct JoinAlgorithm {
                                 const auto& mapping = mappings[out_idx];
                                 size_t target_row_idx = mapping.use_left ? left_row_idx : right_row_idx;
                                 const auto& side = (*mapping.target_side)[mapping.col_idx];
-                                
-                                size_t columnar_buf_idx = target_row_idx / MAX_PER_BUFFER_ENTRY;
-                                size_t columnar_row_offset = target_row_idx % MAX_PER_BUFFER_ENTRY;
-            
-                                const auto& buf = side.buffers[columnar_buf_idx];
-                                value_t val = buf.data[columnar_row_offset];
+                                value_t val = side.get_value(target_row_idx);
 
                                 auto& res_col = temp_results[out_idx];
                                 if (res_col.buffers.empty() || (res_col.buffers.back().count == MAX_PER_BUFFER_ENTRY)) {
@@ -91,6 +117,7 @@ struct JoinAlgorithm {
                                 ++res_col.num_rows;
                             }
                         }
+                    }
                 }
             }
         }
@@ -186,6 +213,30 @@ inline void build_column_inserter(const size_t table_id, const size_t col_id, co
     buffer_t curbuf;
     switch (data_type) {
         case DataType::INT32: {
+            bool has_nulls = false;
+            uint16_t first_page_rows = 0;
+            for (auto& page : pages) {
+                const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
+                uint16_t nr = read_u16(page_data);
+                uint16_t nv = read_u16(page_data + 2);
+                if (first_page_rows == 0) first_page_rows = nr;
+                if (nv != nr) {
+                    has_nulls = true;
+                    break;
+                }
+            }
+            
+            if (!has_nulls && first_page_rows > 0) {
+                new_column.original_col = &column;
+                new_column.rows_per_page = first_page_rows;
+                new_column.num_rows = 0;
+                for (auto& page : pages) {
+                    const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
+                    new_column.num_rows += read_u16(page_data);
+                }
+                return;
+            }
+            
             for (auto& page : pages) {
                 const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
                 uint16_t nr = read_u16(page_data);
@@ -283,7 +334,7 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
         ColumnInserter<std::string> inserter_str{column};
         ColumnInserter<int32_t> inserter_int32{column};
         const column_t& col = result[col_idx];
-        if (col.buffers.empty()) {
+        if (col.num_rows == 0) {
             for (size_t row_idx = 0; row_idx < table.num_rows; ++row_idx) {
                 if (attr_vec[col_idx] == DataType::INT32) {
                     inserter_int32.insert_null();
