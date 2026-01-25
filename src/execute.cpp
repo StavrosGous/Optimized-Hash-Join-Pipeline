@@ -188,6 +188,12 @@ struct JoinAlgorithm {
                 continue;
             }
             
+            // Pre-allocate all buffers needed
+            size_t num_full_buffers = total_rows / MAX_PER_BUFFER_ENTRY;
+            size_t remainder = total_rows % MAX_PER_BUFFER_ENTRY;
+            size_t total_buffers = num_full_buffers + (remainder > 0 ? 1 : 0);
+            final_results[out_idx].buffers.reserve(total_buffers);
+            
             buffer_t current_buf;
             
             for (size_t t = 0; t < num_threads; ++t) {
