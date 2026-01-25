@@ -615,6 +615,127 @@ Query 33b >>             Runtime: 17 ms - Result correct: true
 Query 33c >>             Runtime: 24 ms - Result correct: true
 Total runtime: 3019 ms
 ``` 
+## Final Fast
+Runtime measurements captured from `./run.sh fast_plans` which includes test queries `1a-33c` had a mean total runtime of `2.2` seconds.
+```bash
+$ ./build.sh fast_plans
+$ ./run.sh fast_plans
+gousgou@fineas:~/Documents/k23a-2025-d1-2-odds-1-pipeline$ ./run.sh 
+Query 1a >>              Runtime: 20 ms - Result correct: true
+Query 1b >>              Runtime: 5 ms - Result correct: true
+Query 1c >>              Runtime: 2 ms - Result correct: true
+Query 1d >>              Runtime: 9 ms - Result correct: true
+Query 2a >>              Runtime: 10 ms - Result correct: true
+Query 2b >>              Runtime: 7 ms - Result correct: true
+Query 2c >>              Runtime: 6 ms - Result correct: true
+Query 2d >>              Runtime: 11 ms - Result correct: true
+Query 3a >>              Runtime: 3 ms - Result correct: true
+Query 3b >>              Runtime: 2 ms - Result correct: true
+Query 3c >>              Runtime: 4 ms - Result correct: true
+Query 4a >>              Runtime: 6 ms - Result correct: true
+Query 4b >>              Runtime: 3 ms - Result correct: true
+Query 4c >>              Runtime: 10 ms - Result correct: true
+Query 5a >>              Runtime: 2 ms - Result correct: true
+Query 5b >>              Runtime: 1 ms - Result correct: true
+Query 5c >>              Runtime: 4 ms - Result correct: true
+Query 6a >>              Runtime: 8 ms - Result correct: true
+Query 6b >>              Runtime: 7 ms - Result correct: true
+Query 6c >>              Runtime: 7 ms - Result correct: true
+Query 6d >>              Runtime: 10 ms - Result correct: true
+Query 6e >>              Runtime: 9 ms - Result correct: true
+Query 6f >>              Runtime: 66 ms - Result correct: true
+Query 7a >>              Runtime: 69 ms - Result correct: true
+Query 7b >>              Runtime: 14 ms - Result correct: true
+Query 7c >>              Runtime: 27 ms - Result correct: true
+Query 8a >>              Runtime: 7 ms - Result correct: true
+Query 8b >>              Runtime: 5 ms - Result correct: true
+Query 8c >>              Runtime: 99 ms - Result correct: true
+Query 8d >>              Runtime: 48 ms - Result correct: true
+Query 9a >>              Runtime: 12 ms - Result correct: true
+Query 9b >>              Runtime: 11 ms - Result correct: true
+Query 9c >>              Runtime: 15 ms - Result correct: true
+Query 9d >>              Runtime: 40 ms - Result correct: true
+Query 10a >>             Runtime: 9 ms - Result correct: true
+Query 10b >>             Runtime: 8 ms - Result correct: true
+Query 10c >>             Runtime: 35 ms - Result correct: true
+Query 11a >>             Runtime: 7 ms - Result correct: true
+Query 11b >>             Runtime: 3 ms - Result correct: true
+Query 11c >>             Runtime: 9 ms - Result correct: true
+Query 11d >>             Runtime: 10 ms - Result correct: true
+Query 12a >>             Runtime: 4 ms - Result correct: true
+Query 12b >>             Runtime: 30 ms - Result correct: true
+Query 12c >>             Runtime: 7 ms - Result correct: true
+Query 13a >>             Runtime: 55 ms - Result correct: true
+Query 13b >>             Runtime: 14 ms - Result correct: true
+Query 13c >>             Runtime: 15 ms - Result correct: true
+Query 13d >>             Runtime: 128 ms - Result correct: true
+Query 14a >>             Runtime: 8 ms - Result correct: true
+Query 14b >>             Runtime: 5 ms - Result correct: true
+Query 14c >>             Runtime: 10 ms - Result correct: true
+Query 15a >>             Runtime: 5 ms - Result correct: true
+Query 15b >>             Runtime: 4 ms - Result correct: true
+Query 15c >>             Runtime: 7 ms - Result correct: true
+Query 15d >>             Runtime: 7 ms - Result correct: true
+Query 16a >>             Runtime: 22 ms - Result correct: true
+Query 16b >>             Runtime: 105 ms - Result correct: true
+Query 16c >>             Runtime: 20 ms - Result correct: true
+Query 16d >>             Runtime: 18 ms - Result correct: true
+Query 17a >>             Runtime: 34 ms - Result correct: true
+Query 17b >>             Runtime: 11 ms - Result correct: true
+Query 17c >>             Runtime: 9 ms - Result correct: true
+Query 17d >>             Runtime: 8 ms - Result correct: true
+Query 17e >>             Runtime: 54 ms - Result correct: true
+Query 17f >>             Runtime: 33 ms - Result correct: true
+Query 18a >>             Runtime: 36 ms - Result correct: true
+Query 18b >>             Runtime: 4 ms - Result correct: true
+Query 18c >>             Runtime: 14 ms - Result correct: true
+Query 19a >>             Runtime: 6 ms - Result correct: true
+Query 19b >>             Runtime: 5 ms - Result correct: true
+Query 19c >>             Runtime: 9 ms - Result correct: true
+Query 19d >>             Runtime: 77 ms - Result correct: true
+Query 20a >>             Runtime: 60 ms - Result correct: true
+Query 20b >>             Runtime: 57 ms - Result correct: true
+Query 20c >>             Runtime: 76 ms - Result correct: true
+Query 21a >>             Runtime: 7 ms - Result correct: true
+Query 21b >>             Runtime: 7 ms - Result correct: true
+Query 21c >>             Runtime: 9 ms - Result correct: true
+Query 22a >>             Runtime: 11 ms - Result correct: true
+Query 22b >>             Runtime: 10 ms - Result correct: true
+Query 22c >>             Runtime: 18 ms - Result correct: true
+Query 22d >>             Runtime: 13 ms - Result correct: true
+Query 23a >>             Runtime: 6 ms - Result correct: true
+Query 23b >>             Runtime: 6 ms - Result correct: true
+Query 23c >>             Runtime: 7 ms - Result correct: true
+Query 24a >>             Runtime: 13 ms - Result correct: true
+Query 24b >>             Runtime: 11 ms - Result correct: true
+Query 25a >>             Runtime: 15 ms - Result correct: true
+Query 25b >>             Runtime: 10 ms - Result correct: true
+Query 25c >>             Runtime: 17 ms - Result correct: true
+Query 26a >>             Runtime: 85 ms - Result correct: true
+Query 26b >>             Runtime: 68 ms - Result correct: true
+Query 26c >>             Runtime: 106 ms - Result correct: true
+Query 27a >>             Runtime: 7 ms - Result correct: true
+Query 27b >>             Runtime: 5 ms - Result correct: true
+Query 27c >>             Runtime: 9 ms - Result correct: true
+Query 28a >>             Runtime: 12 ms - Result correct: true
+Query 28b >>             Runtime: 7 ms - Result correct: true
+Query 28c >>             Runtime: 11 ms - Result correct: true
+Query 29a >>             Runtime: 8 ms - Result correct: true
+Query 29b >>             Runtime: 9 ms - Result correct: true
+Query 29c >>             Runtime: 22 ms - Result correct: true
+Query 30a >>             Runtime: 12 ms - Result correct: true
+Query 30b >>             Runtime: 9 ms - Result correct: true
+Query 30c >>             Runtime: 17 ms - Result correct: true
+Query 31a >>             Runtime: 16 ms - Result correct: true
+Query 31b >>             Runtime: 11 ms - Result correct: true
+Query 31c >>             Runtime: 21 ms - Result correct: true
+Query 32a >>             Runtime: 8 ms - Result correct: true
+Query 32b >>             Runtime: 19 ms - Result correct: true
+Query 33a >>             Runtime: 16 ms - Result correct: true
+Query 33b >>             Runtime: 13 ms - Result correct: true
+Query 33c >>             Runtime: 21 ms - Result correct: true
+Total runtime: 2269 ms
+```
 
 # Benchmark conclusions
 
