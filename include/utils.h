@@ -5,6 +5,10 @@
 #include <iostream>
 #include <vector>
 #include <atomic>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <functional>
 
 #ifndef SMALL_SIZE
 #define SMALL_SIZE 4096
@@ -230,4 +234,77 @@ struct ThreadLocalState {
         counts[part]++;
         return level3[part].allocate<T>();
     }
+};
+
+class ThreadPool {
+    std::vector<std::thread> workers;
+    std::function<void(size_t)> task;
+    std::mutex mtx;
+    std::condition_variable cv_start;
+    std::condition_variable cv_done;
+    std::atomic<size_t> active_count{0};
+    size_t num_threads;
+    bool shutdown = false;
+    size_t generation = 0;  
+    std::vector<size_t> worker_generation;  
+
+    void worker_loop(size_t thread_id) {
+        size_t my_generation = 0;
+        while (true) {
+            std::unique_lock<std::mutex> lock(mtx);
+            cv_start.wait(lock, [this, &my_generation] { 
+                return shutdown || generation > my_generation; 
+            });
+            
+            if (shutdown) return;
+            
+            my_generation = generation;
+            auto local_task = task;
+            lock.unlock();
+            
+            local_task(thread_id);
+            
+            if (active_count.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                std::lock_guard<std::mutex> done_lock(mtx);
+                cv_done.notify_one();
+            }
+        }
+    }
+
+public:
+    ThreadPool(size_t n_threads) : num_threads(n_threads), worker_generation(n_threads, 0) {
+        workers.reserve(num_threads);
+        for (size_t i = 0; i < num_threads; ++i) {
+            workers.emplace_back([this, i] { worker_loop(i); });
+        }
+    }
+
+    ~ThreadPool() {
+        std::lock_guard<std::mutex> lock(mtx);
+        shutdown = true;
+        
+        cv_start.notify_all();
+        for (auto& w : workers) {
+            w.join();
+        }
+    }
+
+
+    void run_parallel(std::function<void(size_t)> task_func) {
+        std::lock_guard<std::mutex> lock(mtx);
+        task = std::move(task_func);
+        active_count.store(num_threads, std::memory_order_release);
+        ++generation;
+        
+        cv_start.notify_all();
+        
+        std::unique_lock<std::mutex> lock(mtx);
+        cv_done.wait(lock, [this] { return active_count.load(std::memory_order_acquire) == 0; });
+        
+    }
+
+    size_t get_num_threads() const { return num_threads; }
+
+    ThreadPool(const ThreadPool&) = delete;
+    ThreadPool& operator=(const ThreadPool&) = delete;
 };
