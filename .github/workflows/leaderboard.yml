@@ -2,7 +2,7 @@ name: Workflow for leaderboard submission
 
 on:
   push:
-    branches: [ main, parallel-probe ]
+    branches: [ main, parallel-probe, work-stealing]
   pull_request:
     branches: [ main ]
 

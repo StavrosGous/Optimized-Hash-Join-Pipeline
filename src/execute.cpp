@@ -6,6 +6,7 @@
 #include <string_view>
 #include <thread>
 #include <vector>
+#include <atomic>
 #include "unchained_ht.h"
 
 
@@ -61,6 +62,7 @@ struct JoinAlgorithm {
         }
 
         size_t num_threads = SPC__THREAD_COUNT;
+
         if (num_threads == 0) num_threads = 4;
         
         std::vector<ExecuteResult> thread_results(num_threads);
@@ -72,30 +74,22 @@ struct JoinAlgorithm {
             const auto& pages = probe_column.original_col->pages;
             size_t num_pages = pages.size();
             
-            std::vector<size_t> page_start_indices(num_pages + 1);
-            page_start_indices[0] = 0;
-            for (size_t p = 0; p < num_pages; ++p) {
-                const uint8_t* page_data = reinterpret_cast<const uint8_t*>(pages[p]->data);
-                uint16_t nr = read_u16(page_data);
-                page_start_indices[p + 1] = page_start_indices[p] + nr;
-            }
+            // Use pre-calculated page_rowids from column creation
+            const auto& page_rowids = probe_column.page_rowids;
             
-            size_t pages_per_thread = (num_pages + num_threads - 1) / num_threads;
+            std::atomic<size_t> work_counter{0};
             
             std::vector<std::thread> threads;
             for (size_t t = 0; t < num_threads; ++t) {
-                size_t start_page = t * pages_per_thread;
-                size_t end_page = std::min(start_page + pages_per_thread, num_pages);
-                
-                threads.emplace_back([&, t, start_page, end_page]() {
+                threads.emplace_back([&, t]() {
                     ExecuteResult& local_results = thread_results[t];
                     
-                    for (size_t page_idx = start_page; page_idx < end_page; ++page_idx) {
-                        
+                    size_t page_idx;
+                    while ((page_idx = work_counter.fetch_add(1, std::memory_order_relaxed)) < num_pages) {
                         const uint8_t* page_data = reinterpret_cast<const uint8_t*>(pages[page_idx]->data);
                         uint16_t nr = read_u16(page_data);
                         const int32_t* values = reinterpret_cast<const int32_t*>(page_data + 4);
-                        size_t base_idx = page_start_indices[page_idx];
+                        size_t base_idx = page_rowids[page_idx];
                         
                         for (uint16_t i = 0; i < nr; ++i) {
                             int32_t key = values[i];
@@ -133,18 +127,15 @@ struct JoinAlgorithm {
         } else {
             size_t num_buffers = probe_column.buffers.size();
             
-            size_t buffers_per_thread = (num_buffers + num_threads - 1) / num_threads;
+            std::atomic<size_t> work_counter{0};
             
             std::vector<std::thread> threads;
             for (size_t t = 0; t < num_threads; ++t) {
-                size_t start_buf = t * buffers_per_thread;
-                size_t end_buf = std::min(start_buf + buffers_per_thread, num_buffers);
-                
-                threads.emplace_back([&, t, start_buf, end_buf]() {
+                threads.emplace_back([&, t]() {
                     ExecuteResult& local_results = thread_results[t];
                     
-                    for (size_t buf_idx = start_buf; buf_idx < end_buf; ++buf_idx) {
-                        
+                    size_t buf_idx;
+                    while ((buf_idx = work_counter.fetch_add(1, std::memory_order_relaxed)) < num_buffers) {
                         const auto& probe_buffer = probe_column.buffers[buf_idx];
                         for (size_t i = 0; i < probe_buffer.count; ++i) {
                             value_t probe_val = probe_buffer.data[i];
@@ -196,6 +187,12 @@ struct JoinAlgorithm {
             if (total_rows == 0) {
                 continue;
             }
+            
+            // Pre-allocate all buffers needed
+            size_t num_full_buffers = total_rows / MAX_PER_BUFFER_ENTRY;
+            size_t remainder = total_rows % MAX_PER_BUFFER_ENTRY;
+            size_t total_buffers = num_full_buffers + (remainder > 0 ? 1 : 0);
+            final_results[out_idx].buffers.reserve(total_buffers);
             
             buffer_t current_buf;
             
@@ -257,7 +254,8 @@ ExecuteResult execute_scan(const Plan&               plan,
     auto                           table_id = scan.base_table_id;
     auto&                          input    = plan.inputs[table_id];
     ExecuteResult                results(output_attrs.size());
-    for (const auto& [idx, attr] : output_attrs | ranges::views::enumerate) {
+    for (size_t idx = 0; idx < output_attrs.size(); ++idx) {
+        auto& attr = output_attrs[idx];
         auto col_idx = std::get<0>(attr);
         auto& column = input.columns[col_idx];
         DataType data_type = column.type;
@@ -329,9 +327,14 @@ inline void build_column_inserter(const size_t table_id, const size_t col_id, co
                 new_column.original_col = &column;
                 new_column.rows_per_page = first_page_rows;
                 new_column.num_rows = 0;
+                // Pre-calculate page_rowids for efficient probing
+                new_column.page_rowids.reserve(pages.size() + 1);
+                new_column.page_rowids.push_back(0);
                 for (auto& page : pages) {
                     const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
-                    new_column.num_rows += read_u16(page_data);
+                    uint16_t nr = read_u16(page_data);
+                    new_column.num_rows += nr;
+                    new_column.page_rowids.push_back(new_column.num_rows);
                 }
                 return;
             }
@@ -365,7 +368,8 @@ inline void build_column_inserter(const size_t table_id, const size_t col_id, co
         }
         case DataType::VARCHAR: {
             
-            for (const auto& [idx, page] : pages | views::enumerate) {
+            for (size_t idx = 0; idx < pages.size(); ++idx) {
+                const auto& page = pages[idx];
                 const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
                 uint16_t nr = read_u16(page_data);
 
