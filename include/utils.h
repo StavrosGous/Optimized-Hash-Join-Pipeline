@@ -187,10 +187,17 @@ class GlobalAllocator {
 public:
 
     void reserve(size_t num_chunks) {
-        for (size_t i = 0; i < num_chunks; i++) {
+        // Only allocate new chunks if we don't have enough
+        size_t current_size = large_chunks.size();
+        for (size_t i = current_size; i < num_chunks; i++) {
             LargeChunk *chunk = new LargeChunk();
             large_chunks.push_back(chunk);
         }
+    }
+
+    // Reset the allocator to reuse existing chunks
+    void reset() {
+        next_idx.store(0, std::memory_order_relaxed);
     }
 
     LargeChunk *allocate() {
@@ -198,7 +205,8 @@ public:
         if (idx < large_chunks.size()) {
             return large_chunks[idx];
         }
-        return new LargeChunk();
+        LargeChunk *chunk = new LargeChunk();
+        return chunk;
     }
 
     void free_all() {
@@ -206,6 +214,7 @@ public:
             delete chunk;
         }
         large_chunks.clear();
+        next_idx.store(0, std::memory_order_relaxed);
     }
     ~GlobalAllocator() {
         free_all();

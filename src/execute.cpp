@@ -14,9 +14,11 @@ namespace Contest {
 
 // Global thread pool
 ThreadPool* g_thread_pool = nullptr;
+// Global allocator for hash table builds - reused across all joins
+GlobalAllocator* g_global_alloc = nullptr;
 
 using ExecuteResult = std::vector<column_t>;
-ExecuteResult execute_impl(const Plan&, size_t, ThreadPool&);
+ExecuteResult execute_impl(const Plan&, size_t, ThreadPool&, GlobalAllocator&);
 inline void build_column_inserter(const size_t, const size_t, const Column&, DataType, column_t&);
 ColumnarTable materialize_columnar_table_parallel(const Plan&, const ExecuteResult&, const std::vector<DataType>&, ThreadPool&);
 
@@ -27,6 +29,7 @@ struct JoinAlgorithm {
     size_t                                           left_col, right_col;
     const std::vector<std::tuple<size_t, DataType>>& output_attrs;
     ThreadPool&                                      thread_pool;
+    GlobalAllocator&                                 global_alloc;
 
     template <class T>
     auto run() {
@@ -46,7 +49,7 @@ struct JoinAlgorithm {
 
         // build hash_table
         UnchainedHashTable hash_table(build_column.num_rows);
-        hash_table.build_parallel(build_column, thread_pool);
+        hash_table.build_parallel(build_column, thread_pool, global_alloc);
         
         // helper struct to map the output columns to the corresponding input columns once before the join
         struct OutputMapping {
@@ -210,15 +213,16 @@ struct JoinAlgorithm {
 ExecuteResult execute_hash_join(const Plan&          plan,
     const JoinNode&                                  join,
     const std::vector<std::tuple<size_t, DataType>>& output_attrs,
-    ThreadPool& thread_pool) {
+    ThreadPool& thread_pool,
+    GlobalAllocator& global_alloc) {
     auto                           left_idx    = join.left;
     auto                           right_idx   = join.right;
     auto&                          left_node   = plan.nodes[left_idx];
     auto&                          right_node  = plan.nodes[right_idx];
     auto&                          left_attr_vec  = left_node.output_attrs;
     auto&                          right_attr_vec = right_node.output_attrs;
-    auto                           left        = execute_impl(plan, left_idx, thread_pool);
-    auto                           right       = execute_impl(plan, right_idx, thread_pool);
+    auto                           left        = execute_impl(plan, left_idx, thread_pool, global_alloc);
+    auto                           right       = execute_impl(plan, right_idx, thread_pool, global_alloc);
     std::vector<column_t> results;
     results.reserve(std::min(left.size() + right.size(), static_cast<size_t>(left.size() * 2)));
 
@@ -229,7 +233,8 @@ ExecuteResult execute_hash_join(const Plan&          plan,
         .left_col                            = join.left_attr,
         .right_col                           = join.right_attr,
         .output_attrs                        = output_attrs,
-        .thread_pool                         = thread_pool};
+        .thread_pool                         = thread_pool,
+        .global_alloc                        = global_alloc};
     join_algorithm.run<int32_t>();
     return std::move(results);
 }
@@ -253,13 +258,13 @@ ExecuteResult execute_scan(const Plan&               plan,
     return std::move(results);
 }
 
-ExecuteResult execute_impl(const Plan& plan, size_t node_idx, ThreadPool& thread_pool) {
+ExecuteResult execute_impl(const Plan& plan, size_t node_idx, ThreadPool& thread_pool, GlobalAllocator& global_alloc) {
     auto& node = plan.nodes[node_idx];
     auto ret = (std::visit(
         [&](const auto& value) {
             using T = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<T, JoinNode>) {
-                return std::move(execute_hash_join(plan, value, node.output_attrs, thread_pool));
+                return std::move(execute_hash_join(plan, value, node.output_attrs, thread_pool, global_alloc));
             } else {
                 return std::move(execute_scan(plan, value, node.output_attrs));
             }
@@ -279,8 +284,14 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
         g_thread_pool = new ThreadPool(num_threads);
     }
     
+    // Initialize global allocator if not already created
+    if (!g_global_alloc) {
+        g_global_alloc = new GlobalAllocator();
+    }
+    
     ThreadPool& thread_pool = *g_thread_pool;
-    auto ret        = execute_impl(plan, plan.root, thread_pool);
+    GlobalAllocator& global_alloc = *g_global_alloc;
+    auto ret        = execute_impl(plan, plan.root, thread_pool, global_alloc);
     std::vector<DataType> ret_attr_vec;
     ret_attr_vec.reserve(plan.nodes[plan.root].output_attrs.size());
     for (const auto& attr : plan.nodes[plan.root].output_attrs) {

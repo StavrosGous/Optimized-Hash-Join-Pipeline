@@ -276,7 +276,7 @@ public:
         uint32_t row_idx;
     };
 
-    void build_parallel(const column_t& col, ThreadPool& thread_pool) {
+    void build_parallel(const column_t& col, ThreadPool& thread_pool, GlobalAllocator& global_alloc) {
         size_t total_tuples = col.num_rows;
         size_t num_threads = thread_pool.get_num_threads();
 
@@ -292,8 +292,8 @@ public:
         size_t overhead_chunks = num_threads * ((NUM_PARTITIONS * SMALL_DATA + LARGE_DATA - 1) / LARGE_DATA + 1);
         size_t num_large_chunks = base_chunks + overhead_chunks;
 
-        GlobalAllocator global_alloc;
-
+        // Reset and reserve the global allocator for reuse
+        global_alloc.reset();
         global_alloc.reserve(num_large_chunks);
 
         std::vector<ThreadLocalState *> thread_states(num_threads);
