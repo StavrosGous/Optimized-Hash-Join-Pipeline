@@ -12,6 +12,9 @@
 
 namespace Contest {
 
+// Global thread pool
+ThreadPool* g_thread_pool = nullptr;
+
 using ExecuteResult = std::vector<column_t>;
 ExecuteResult execute_impl(const Plan&, size_t, ThreadPool&);
 inline void build_column_inserter(const size_t, const size_t, const Column&, DataType, column_t&);
@@ -268,7 +271,15 @@ ExecuteResult execute_impl(const Plan& plan, size_t node_idx, ThreadPool& thread
 
 ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     namespace views = ranges::views;
-    ThreadPool& thread_pool = *static_cast<ThreadPool*>(context);
+    
+    // Initialize global threadpool if not already created
+    if (!g_thread_pool) {
+        size_t num_threads = SPC__THREAD_COUNT;
+        if (num_threads == 0) num_threads = 4;
+        g_thread_pool = new ThreadPool(num_threads);
+    }
+    
+    ThreadPool& thread_pool = *g_thread_pool;
     auto ret        = execute_impl(plan, plan.root, thread_pool);
     std::vector<DataType> ret_attr_vec;
     ret_attr_vec.reserve(plan.nodes[plan.root].output_attrs.size());
@@ -280,15 +291,10 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
 }
 
 void* build_context() {
-    size_t num_threads = SPC__THREAD_COUNT;
-    if (num_threads == 0) num_threads = 4;
-    return new ThreadPool(num_threads);
+    return nullptr;
 }
 
 void destroy_context([[maybe_unused]] void* context) {
-    if (context) {
-        delete static_cast<ThreadPool*>(context);
-    }
 }
 
 
