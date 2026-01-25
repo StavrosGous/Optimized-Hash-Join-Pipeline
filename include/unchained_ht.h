@@ -3,6 +3,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <utility>
+#include <thread>
+#include <algorithm> 
+#include <chrono>
+#include <iostream>
 #include "utils.h"
 
 const uint16_t tags[2048] = {   // Precalculated 4 bit Bloom filter tags + padding
@@ -271,6 +275,99 @@ public:
         uint32_t row_idx;
     };
 
+    void build_parallel(const column_t& col, size_t num_threads = std::thread::hardware_concurrency()) {
+        size_t total_tuples = col.num_rows;
+
+        constexpr size_t ENTRY_SIZE = sizeof(Entry);
+        constexpr size_t SMALL_DATA = SMALL_SIZE;
+        constexpr size_t LARGE_DATA = LARGE_SIZE;
+        constexpr size_t SMALLS_PER_LARGE = LARGE_DATA / SMALL_SIZE;
+        constexpr size_t TUPLES_PER_SMALL = SMALL_DATA / ENTRY_SIZE;
+        constexpr size_t TUPLES_PER_LARGE = TUPLES_PER_SMALL * SMALLS_PER_LARGE;
+
+
+        size_t base_chunks = (total_tuples + TUPLES_PER_LARGE - 1) / TUPLES_PER_LARGE;
+        size_t overhead_chunks = num_threads * ((NUM_PARTITIONS * SMALL_DATA + LARGE_DATA - 1) / LARGE_DATA + 1);
+        size_t num_large_chunks = base_chunks + overhead_chunks;
+
+        GlobalAllocator global_alloc;
+
+        global_alloc.reserve(num_large_chunks);
+
+        std::vector<ThreadLocalState *> thread_states(num_threads);
+
+        for (int t = 0; t < num_threads; ++t) {
+            thread_states[t] = new ThreadLocalState(global_alloc);
+        }
+
+        // split to partitions & count tuples
+        size_t tuples_per_thread = (total_tuples + num_threads - 1) / num_threads;
+        
+        std::vector<std::thread> threads;
+
+        for (size_t t = 0; t < num_threads; ++t) {
+            size_t start_idx = t * tuples_per_thread;
+            size_t end_idx = std::min(start_idx + tuples_per_thread, total_tuples);
+
+            threads.emplace_back([&col, &thread_states, t, start_idx, end_idx]() {
+                for (size_t row_idx = start_idx; row_idx < end_idx; ++row_idx) {
+                    value_t val = col.get_value(row_idx);
+                    if (!val.int32_val.status) continue;
+
+                    int32_t key = val.int32_val.val;
+                    uint64_t hash = crc_hash(key);
+
+                    ThreadLocalState* tls = thread_states[t];
+                    Entry* entry = tls->consume<Entry>(hash);
+                    entry->key = key;
+                    entry->row_idx = static_cast<uint32_t>(row_idx);
+                }
+            });
+        }
+
+        for (auto& thread : threads) {
+            thread.join();
+        }
+
+        threads.clear();
+
+        size_t count_total[NUM_PARTITIONS] = {0};
+        for (size_t p = 0; p < NUM_PARTITIONS; ++p) {
+            for (size_t t = 0; t < num_threads; ++t) {
+                count_total[p] += thread_states[t]->counts[p];
+            }   
+        }
+
+        std::vector<size_t> partition_offsets(NUM_PARTITIONS + 1);
+        partition_offsets[0] = 0;
+        for (size_t p = 0; p < NUM_PARTITIONS; ++p) {
+            partition_offsets[p + 1] = partition_offsets[p] + count_total[p];
+        }
+
+        // postProcessBuild with direct chunk traversal
+        size_t partitions_per_thread = (NUM_PARTITIONS + num_threads - 1) / num_threads;
+        
+        for (size_t t = 0; t < num_threads; ++t) {
+            size_t start_partition = t * partitions_per_thread;
+            size_t end_partition = std::min(start_partition + partitions_per_thread, (size_t)NUM_PARTITIONS);
+            
+            threads.emplace_back([this, &thread_states, &partition_offsets, start_partition, end_partition, num_threads]() {
+                for (size_t p = start_partition; p < end_partition; ++p) {
+                    postProcessBuild(p, partition_offsets[p], thread_states, num_threads);
+                }
+            });
+        }
+
+        for (auto& thread : threads) {
+            thread.join();
+        }
+
+        // Clean up thread states after postProcessBuild completes
+        for (size_t t = 0; t < num_threads; ++t) {
+            delete thread_states[t];
+        }
+    };
+
     UnchainedHashTable(size_t sz) {
         size_t shift_val = 9; // minimum size 512 entries
         while ((1 << shift_val) <= sz) shift_val++;
@@ -301,84 +398,6 @@ public:
         return {start, end};
     }
 
-    void build(const column_t& col) {
-        if (col.original_col != nullptr) {
-            size_t row_idx = 0;
-            for (const auto& page : col.original_col->pages) {
-                const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
-                uint16_t nr = read_u16(page_data);
-                const int32_t* values = reinterpret_cast<const int32_t*>(page_data + 4);
-                for (uint16_t i = 0; i < nr; ++i) {
-                    int32_t key = values[i];
-                    uint64_t hash = crc_hash(key);
-                    uint64_t slot = hash >> shift;
-                    directory[slot] += sizeof(Entry) << 16;
-                    directory[slot] |= tags[((uint32_t)hash) >> (32 - 11)];
-                }
-            }
-            
-            uint64_t cur = (uint64_t)(tuples);
-            for (uint64_t i = 0; i < capacity; i++) {
-                uint64_t val = directory[i] >> 16;
-                directory[i] = (cur << 16) | ((uint16_t)directory[i]);
-                cur += val;
-            }
-            
-            for (const auto& page : col.original_col->pages) {
-                const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
-                uint16_t nr = read_u16(page_data);
-                const int32_t* values = reinterpret_cast<const int32_t*>(page_data + 4);
-                for (uint16_t i = 0; i < nr; ++i) {
-                    int32_t key = values[i];
-                    uint64_t slot = (crc_hash(key)) >> shift;
-                    Entry* target = (Entry*)(directory[slot] >> 16);
-                    target->row_idx = static_cast<uint32_t>(row_idx);
-                    target->key = key;
-                    directory[slot] += sizeof(Entry) << 16;
-                    ++row_idx;
-                }
-            }
-        } else {
-            
-            for (auto &buffer : col.buffers) {
-                for (auto i = 0; i < buffer.count; ++i) {
-                    if (!buffer.data[i].int32_val.status) continue;
-                    int32_t key = buffer.data[i].int32_val.val;
-                    uint64_t hash = crc_hash(key);
-                    uint64_t slot = hash >> shift; 
-                    directory[slot] += sizeof(Entry) << 16;
-                    directory[slot] |= tags[((uint32_t)hash) >> (32 - 11)];
-                }
-            }
-            
-            // second pass computes the starting offset of each tuples bucket
-            uint64_t cur = (uint64_t)(tuples);
-            for (uint64_t i = 0; i < capacity; i++) {
-                uint64_t val = directory[i] >> 16;
-                directory[i] = (cur << 16) | ((uint16_t)directory[i]);
-                cur += val;
-            }
-            // third pass stores entries with global row index
-            size_t global_row_idx = 0;
-            for (size_t buf_idx = 0; buf_idx < col.buffers.size(); ++buf_idx) {
-                const auto& buffer = col.buffers[buf_idx];
-                for (auto i = 0; i < buffer.count; ++i) {
-                    if (!buffer.data[i].int32_val.status) {
-                        ++global_row_idx;
-                        continue;
-                    }
-                    int32_t key = buffer.data[i].int32_val.val;
-                    uint64_t slot = (crc_hash(key)) >> shift;
-                    Entry* target = (Entry*)(directory[slot] >> 16);
-                    target->row_idx = static_cast<uint32_t>(global_row_idx);
-                    target->key = key;
-                    directory[slot] += sizeof(Entry) << 16;
-                    ++global_row_idx;
-                }
-            }
-        }
-    }
-
 private:
     uint64_t* directory;
     Entry* tuples;
@@ -388,5 +407,67 @@ private:
     inline bool couldContain(const uint16_t entry, const uint64_t hash) const {
         uint16_t tag = tags[((uint32_t)hash) >> (32 - 11) /*shr*/ ]; // mov
         return !(tag & ~entry); // andn
+    }
+
+    static constexpr size_t ENTRIES_PER_CHUNK = (SMALL_SIZE - sizeof(SmallChunk*)) / sizeof(Entry);
+
+    // Helper to iterate over entries in a partition from a single thread's slab
+    template<typename Func>
+    void forEachEntryInPartition(ThreadLocalState* tls, size_t partition, Func&& func) {
+        size_t total = tls->counts[partition];
+        if (total == 0) return;
+        
+        SmallChunk* chunk = tls->level3[partition].get_chunks();
+        size_t first_chunk_entries = total % ENTRIES_PER_CHUNK;
+        if (first_chunk_entries == 0) first_chunk_entries = ENTRIES_PER_CHUNK;
+        
+        size_t remaining = total;
+        bool is_first = true;
+        
+        while (chunk != nullptr && remaining > 0) {
+            Entry* entries = reinterpret_cast<Entry*>(chunk->data);
+            size_t count = is_first ? first_chunk_entries : ENTRIES_PER_CHUNK;
+            count = std::min(count, remaining);
+            
+            for (size_t i = 0; i < count; ++i) {
+                func(entries[i]);
+            }
+            
+            remaining -= count;
+            is_first = false;
+            chunk = chunk->next;
+        }
+    }
+
+    void postProcessBuild(uint64_t partition, uint64_t prevCount, 
+                                 std::vector<ThreadLocalState*>& thread_states, size_t num_threads) {
+        for (size_t t = 0; t < num_threads; ++t) {
+            forEachEntryInPartition(thread_states[t], partition, [this](Entry& tuple) {
+                uint64_t hash = crc_hash(tuple.key);
+                uint64_t slot = hash >> shift;
+                directory[slot] += sizeof(Entry) << 16;
+                directory[slot] |= tags[((uint32_t)hash) >> (32 - 11)];
+            });
+        }
+
+        uint64_t cur = reinterpret_cast<uint64_t>(tuples + prevCount);
+        uint64_t k = 64 - shift;
+        uint64_t start = (partition << k) / NUM_PARTITIONS;
+        uint64_t end = ((partition + 1) << k) / NUM_PARTITIONS;
+        for (uint64_t i = start; i < end; ++i) {
+            uint64_t val = directory[i] >> 16;
+            directory[i] = (cur << 16) | ((uint16_t)directory[i]);
+            cur += val;
+        }
+
+        for (size_t t = 0; t < num_threads; ++t) {
+            forEachEntryInPartition(thread_states[t], partition, [this](Entry& tuple) {
+                uint64_t hash = crc_hash(tuple.key);
+                uint64_t slot = hash >> shift;
+                Entry* target = reinterpret_cast<Entry*>(directory[slot] >> 16);
+                *target = tuple;
+                directory[slot] += sizeof(Entry) << 16;
+            });
+        }
     }
 };

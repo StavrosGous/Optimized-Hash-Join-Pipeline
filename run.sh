@@ -1,5 +1,9 @@
 #!/bin/bash
 
+if [ $# -eq 0 ]; then
+    set -- "fast_plans"
+fi
+
 # if argument is "main" run this, otherwise if "fast_plans" run ./build/fast plans.json
 if [ "$1" == "main" ]; then
     g++ ./main.cpp -o main -I ./include && time ./main || echo "Compilation or execution failed"

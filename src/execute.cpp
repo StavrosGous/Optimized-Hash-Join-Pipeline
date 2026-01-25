@@ -40,7 +40,7 @@ struct JoinAlgorithm {
         auto const &build_column = build_left ? left_col_val : right_col_val;
         auto const &probe_column = build_left ? right_col_val : left_col_val;
         UnchainedHashTable hash_table(build_column.num_rows);
-        hash_table.build(build_column);
+        hash_table.build_parallel(build_column);
         // helper struct to map the output columns to the corresponding input columns once before the join
         struct OutputMapping {
             const ExecuteResult* target_side; // pointer to either left or right target side

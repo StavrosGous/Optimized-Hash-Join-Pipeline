@@ -3,8 +3,23 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <vector>
+#include <atomic>
+
+#ifndef SMALL_SIZE
+#define SMALL_SIZE 4096
+#endif
+#ifndef LARGE_SIZE
+#define LARGE_SIZE 65536
+#endif
 #ifndef CAPACITY
 #define CAPACITY 64
+#endif
+#ifndef NUM_PARTITIONS
+#define NUM_PARTITIONS 64
+#endif
+#ifndef LOG2_NUM_PARTITIONS
+#define LOG2_NUM_PARTITIONS 6
 #endif
 #include "plan.h"
 #include "attribute.h"
@@ -118,5 +133,100 @@ struct column_t {
             val.int32_val.status = 1;
             return val;
         }
+    }
+};
+
+
+struct SmallChunk {
+    SmallChunk *next = nullptr;
+    uint8_t data[SMALL_SIZE - sizeof(SmallChunk *)];
+};
+
+struct LargeChunk {
+    LargeChunk *next = nullptr;
+    uint8_t data[LARGE_SIZE - sizeof(LargeChunk *)];
+};
+
+template<typename ChunkType>
+class BumpAllocator {
+    uint8_t *current = nullptr;
+    uint8_t *end = nullptr;
+    ChunkType *chunks = nullptr;
+
+public:
+    ChunkType *get_chunks() {
+        return chunks;
+    }
+
+    size_t free_space() {
+        return end - current;
+    }
+    void add_space(ChunkType *chunk) {
+        chunk->next = chunks;
+        chunks = chunk;
+        current = chunk->data;
+        end = current + sizeof(chunk->data);
+    }
+
+    template<typename T>
+    T* allocate() {
+        T* ptr = reinterpret_cast<T*>(current);
+        current += sizeof(T);
+        return ptr;
+    }
+};
+
+class GlobalAllocator {
+    std::vector<LargeChunk *> large_chunks;
+    std::atomic<size_t> next_idx{0};
+public:
+
+    void reserve(size_t num_chunks) {
+        for (size_t i = 0; i < num_chunks; i++) {
+            LargeChunk *chunk = new LargeChunk();
+            large_chunks.push_back(chunk);
+        }
+    }
+
+    LargeChunk *allocate() {
+        size_t idx = next_idx.fetch_add(1);
+        if (idx < large_chunks.size()) {
+            return large_chunks[idx];
+        }
+        return new LargeChunk();
+    }
+
+    void free_all() {
+        for (auto *chunk: large_chunks) {
+            delete chunk;
+        }
+        large_chunks.clear();
+    }
+    ~GlobalAllocator() {
+        free_all();
+    }
+
+};
+
+
+struct ThreadLocalState {
+    GlobalAllocator &level1;
+    BumpAllocator<LargeChunk> level2;
+    BumpAllocator<SmallChunk> level3[NUM_PARTITIONS];
+    size_t counts[NUM_PARTITIONS] = {0};
+    ThreadLocalState(GlobalAllocator &alloc) : level1(alloc) {}
+
+    template<typename T>
+    T* consume(uint64_t hash) {
+        uint64_t part = hash >> (64 - LOG2_NUM_PARTITIONS);
+        if (level3[part].free_space() < sizeof(T)) {
+            if (level2.free_space() < sizeof(SmallChunk)) {
+                LargeChunk *large_chunk = level1.allocate();
+                level2.add_space(large_chunk);
+            }
+            level3[part].add_space(level2.allocate<SmallChunk>());
+        }
+        counts[part]++;
+        return level3[part].allocate<T>();
     }
 };
