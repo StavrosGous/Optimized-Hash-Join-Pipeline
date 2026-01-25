@@ -336,12 +336,8 @@ public:
             partition_offsets[p + 1] = partition_offsets[p] + count_total[p];
         }
 
-        // postProcessBuild with work stealing
-        std::atomic<size_t> partition_counter{0};
-        
-        thread_pool.run_parallel([this, &thread_states, &partition_offsets, &partition_counter, num_threads](size_t t) {
-            size_t p;
-            while ((p = partition_counter.fetch_add(1, std::memory_order_relaxed)) < NUM_PARTITIONS) {
+        thread_pool.run_parallel([&](size_t t) {
+            for (size_t p = t; p < NUM_PARTITIONS; p += num_threads) {
                 postProcessBuild(p, partition_offsets[p], thread_states, num_threads);
             }
         });
