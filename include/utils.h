@@ -5,6 +5,11 @@
 #include <iostream>
 #include <vector>
 #include <atomic>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <functional>
+#include <sys/mman.h>
 
 #ifndef SMALL_SIZE
 #define SMALL_SIZE 4096
@@ -178,35 +183,87 @@ public:
 };
 
 class GlobalAllocator {
-    std::vector<LargeChunk *> large_chunks;
-    std::atomic<size_t> next_idx{0};
-public:
+    uint8_t* arena = nullptr;           // mmaped memory
+    size_t arena_size = 0;              // mmaped size (bytes)
+    size_t arena_capacity = 0;          // capacity in chunks
+    std::atomic<size_t> next_idx{0};    // next chunk allocated
+    
+    static constexpr size_t CHUNK_SIZE = sizeof(LargeChunk);
+    static constexpr size_t PAGE_SIZE_ALLOC = 4096;
 
-    void reserve(size_t num_chunks) {
-        for (size_t i = 0; i < num_chunks; i++) {
-            LargeChunk *chunk = new LargeChunk();
-            large_chunks.push_back(chunk);
-        }
+public:
+    GlobalAllocator() = default;
+    
+    GlobalAllocator(GlobalAllocator&& other) noexcept 
+        : arena(other.arena), arena_size(other.arena_size),
+          arena_capacity(other.arena_capacity), next_idx(other.next_idx.load()) {
+        other.arena = nullptr;
+        other.arena_size = 0;
+        other.arena_capacity = 0;
+        other.next_idx.store(0);
     }
 
-    LargeChunk *allocate() {
-        size_t idx = next_idx.fetch_add(1);
-        if (idx < large_chunks.size()) {
-            return large_chunks[idx];
+    void reserve(size_t num_chunks) {
+        if (num_chunks <= arena_capacity) return;
+        
+        // Calculate new size (round up to page boundary)
+        size_t new_size = num_chunks * CHUNK_SIZE;
+        new_size = (new_size + PAGE_SIZE_ALLOC - 1) & ~(PAGE_SIZE_ALLOC - 1);
+        
+        // Allocate contiguous region with mmap
+        uint8_t* new_arena = static_cast<uint8_t*>(
+            mmap(nullptr, new_size, PROT_READ | PROT_WRITE, 
+                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+        
+        if (new_arena == MAP_FAILED) {
+            std::cerr << "mmap failed for " << new_size << " bytes" << std::endl;
+            return;
         }
-        return new LargeChunk();
+        
+        size_t used_chunks = next_idx.load(std::memory_order_relaxed);
+        if (arena && used_chunks > 0) {
+            std::memcpy(new_arena, arena, used_chunks * CHUNK_SIZE);
+        }
+        
+        // Free old arena
+        if (arena) {
+            munmap(arena, arena_size);
+        }
+        
+        arena = new_arena;
+        arena_size = new_size;
+        arena_capacity = new_size / CHUNK_SIZE;
+    }
+
+    void reset() {
+        next_idx.store(0, std::memory_order_relaxed);
+    }
+
+    LargeChunk* allocate() {
+        size_t idx = next_idx.fetch_add(1, std::memory_order_relaxed);
+        if (idx < arena_capacity) {
+            return reinterpret_cast<LargeChunk*>(arena + idx * CHUNK_SIZE);
+        }
+        void* ptr = aligned_alloc(alignof(LargeChunk), CHUNK_SIZE);
+        return static_cast<LargeChunk*>(ptr);
     }
 
     void free_all() {
-        for (auto *chunk: large_chunks) {
-            delete chunk;
+        if (arena) {
+            munmap(arena, arena_size);
+            arena = nullptr;
         }
-        large_chunks.clear();
+        arena_size = 0;
+        arena_capacity = 0;
+        next_idx.store(0, std::memory_order_relaxed);
     }
+    
     ~GlobalAllocator() {
         free_all();
     }
-
+    
+    GlobalAllocator(const GlobalAllocator&) = delete;
+    GlobalAllocator& operator=(const GlobalAllocator&) = delete;
 };
 
 
@@ -230,4 +287,78 @@ struct ThreadLocalState {
         counts[part]++;
         return level3[part].allocate<T>();
     }
+};
+
+class ThreadPool {
+    std::vector<std::thread> workers;
+    std::function<void(size_t)> task;
+    std::mutex mtx;
+    std::condition_variable cv_start;
+    std::condition_variable cv_done;
+    std::atomic<size_t> active_count{0};
+    size_t num_threads;
+    bool shutdown = false;
+    size_t generation = 0;  
+    std::vector<size_t> worker_generation;  
+
+    void worker_loop(size_t thread_id) {
+        size_t my_generation = 0;
+        while (true) {
+            std::unique_lock<std::mutex> lock(mtx);
+            cv_start.wait(lock, [this, &my_generation] { 
+                return shutdown || generation > my_generation; 
+            });
+            
+            if (shutdown) return;
+            
+            my_generation = generation;
+            auto local_task = task;
+            lock.unlock();
+            
+            local_task(thread_id);
+            
+            if (active_count.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                std::lock_guard<std::mutex> done_lock(mtx);
+                cv_done.notify_one();
+            }
+        }
+    }
+
+public:
+    ThreadPool(size_t n_threads) : num_threads(n_threads), worker_generation(n_threads, 0) {
+        workers.reserve(num_threads);
+        for (size_t i = 0; i < num_threads; ++i) {
+            workers.emplace_back([this, i] { worker_loop(i); });
+        }
+    }
+
+    ~ThreadPool() {
+        std::unique_lock<std::mutex> lock(mtx);
+        shutdown = true;
+        lock.unlock();
+        cv_start.notify_all();
+        for (auto& w : workers) {
+            w.join();
+        }
+    }
+
+
+    void run_parallel(std::function<void(size_t)> task_func) {
+        std::unique_lock<std::mutex> lock(mtx);
+        task = std::move(task_func);
+        active_count.store(num_threads, std::memory_order_release);
+        ++generation;
+        lock.unlock();
+        
+        cv_start.notify_all();
+        
+        lock.lock();
+        cv_done.wait(lock, [this] { return active_count.load(std::memory_order_acquire) == 0; });
+        lock.unlock();
+    }
+
+    size_t get_num_threads() const { return num_threads; }
+
+    ThreadPool(const ThreadPool&) = delete;
+    ThreadPool& operator=(const ThreadPool&) = delete;
 };

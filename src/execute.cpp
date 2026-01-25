@@ -12,10 +12,15 @@
 
 namespace Contest {
 
+// Global thread pool
+ThreadPool* g_thread_pool = nullptr;
+// Global allocator for hash table builds - reused across all joins
+GlobalAllocator* g_global_alloc = nullptr;
+
 using ExecuteResult = std::vector<column_t>;
-ExecuteResult execute_impl(const Plan&, size_t);
+ExecuteResult execute_impl(const Plan&, size_t, ThreadPool&, GlobalAllocator&);
 inline void build_column_inserter(const size_t, const size_t, const Column&, DataType, column_t&);
-ColumnarTable materialize_columnar_table(const Plan&, const ExecuteResult&, const std::vector<DataType>&);
+ColumnarTable materialize_columnar_table_parallel(const Plan&, const ExecuteResult&, const std::vector<DataType>&, ThreadPool&);
 
 struct JoinAlgorithm {
     ExecuteResult&                                   left;
@@ -23,6 +28,8 @@ struct JoinAlgorithm {
     ExecuteResult&                                   results;
     size_t                                           left_col, right_col;
     const std::vector<std::tuple<size_t, DataType>>& output_attrs;
+    ThreadPool&                                      thread_pool;
+    GlobalAllocator&                                 global_alloc;
 
     template <class T>
     auto run() {
@@ -42,7 +49,7 @@ struct JoinAlgorithm {
 
         // build hash_table
         UnchainedHashTable hash_table(build_column.num_rows);
-        hash_table.build_parallel(build_column);
+        hash_table.build_parallel(build_column, thread_pool, global_alloc);
         
         // helper struct to map the output columns to the corresponding input columns once before the join
         struct OutputMapping {
@@ -52,8 +59,8 @@ struct JoinAlgorithm {
         };
         std::vector<OutputMapping> mappings;
         mappings.reserve(output_attrs.size());
-        for (auto [out_idx, attr] : output_attrs | views::enumerate) {
-            auto col_idx = std::get<0>(attr);
+        for (size_t out_idx =0 ; out_idx < output_attrs.size(); ++out_idx) {
+            auto col_idx = std::get<0>(output_attrs[out_idx]);
             if (col_idx < left.size()) {
                 mappings.push_back({&left, col_idx, true});
             } else {
@@ -61,9 +68,7 @@ struct JoinAlgorithm {
             }
         }
 
-        size_t num_threads = SPC__THREAD_COUNT;
-
-        if (num_threads == 0) num_threads = 4;
+        size_t num_threads = thread_pool.get_num_threads();
         
         std::vector<ExecuteResult> thread_results(num_threads);
         for (size_t t = 0; t < num_threads; ++t) {
@@ -73,31 +78,69 @@ struct JoinAlgorithm {
         if (probe_column.original_col != nullptr) {
             const auto& pages = probe_column.original_col->pages;
             size_t num_pages = pages.size();
-            
             // Use pre-calculated page_rowids from column creation
             const auto& page_rowids = probe_column.page_rowids;
             
             std::atomic<size_t> work_counter{0};
             
-            std::vector<std::thread> threads;
-            for (size_t t = 0; t < num_threads; ++t) {
-                threads.emplace_back([&, t]() {
-                    ExecuteResult& local_results = thread_results[t];
+            thread_pool.run_parallel([&](size_t t) {
+                ExecuteResult& local_results = thread_results[t];
+                
+                size_t page_idx;
+                while ((page_idx = work_counter.fetch_add(1, std::memory_order_relaxed)) < num_pages) {
+                    const uint8_t* page_data = reinterpret_cast<const uint8_t*>(pages[page_idx]->data);
+                    uint16_t nr = read_u16(page_data);
+                    const int32_t* values = reinterpret_cast<const int32_t*>(page_data + 4);
+                    size_t base_idx = page_rowids[page_idx];
                     
-                    size_t page_idx;
-                    while ((page_idx = work_counter.fetch_add(1, std::memory_order_relaxed)) < num_pages) {
-                        const uint8_t* page_data = reinterpret_cast<const uint8_t*>(pages[page_idx]->data);
-                        uint16_t nr = read_u16(page_data);
-                        const int32_t* values = reinterpret_cast<const int32_t*>(page_data + 4);
-                        size_t base_idx = page_rowids[page_idx];
-                        
-                        for (uint16_t i = 0; i < nr; ++i) {
-                            int32_t key = values[i];
+                    for (uint16_t i = 0; i < nr; ++i) {
+                        int32_t key = values[i];
+                        auto [start, end] = hash_table.lookup(key);
+                        for (auto entry_ptr = start; entry_ptr < end; ++entry_ptr) {
+                            if (entry_ptr->key != key) continue;
+                            size_t build_idx = entry_ptr->row_idx;
+                            size_t probe_global_idx = base_idx + i;
+                            size_t left_row_idx = build_left ? build_idx : probe_global_idx;
+                            size_t right_row_idx = build_left ? probe_global_idx : build_idx;
+                            
+                            for (size_t out_idx = 0; out_idx < mappings.size(); ++out_idx) {
+                                const auto& mapping = mappings[out_idx];
+                                size_t target_row_idx = mapping.use_left ? left_row_idx : right_row_idx;
+                                const auto& side = (*mapping.target_side)[mapping.col_idx];
+                                value_t val = side.get_value(target_row_idx);
+                                
+                                auto& res_col = local_results[out_idx];
+                                if (res_col.buffers.empty() || (res_col.buffers.back().count == MAX_PER_BUFFER_ENTRY)) {
+                                    res_col.buffers.emplace_back();
+                                }
+                                auto& last_buf = res_col.buffers.back();
+                                last_buf.data[last_buf.count++] = std::move(val);
+                                ++res_col.num_rows;
+                            }
+                        }
+                    }
+                }
+            });
+        } else {
+            size_t num_buffers = probe_column.buffers.size();
+            
+            std::atomic<size_t> work_counter{0};
+            
+            thread_pool.run_parallel([&](size_t t) {
+                ExecuteResult& local_results = thread_results[t];
+                
+                size_t buf_idx;
+                while ((buf_idx = work_counter.fetch_add(1, std::memory_order_relaxed)) < num_buffers) {
+                    const auto& probe_buffer = probe_column.buffers[buf_idx];
+                    for (size_t i = 0; i < probe_buffer.count; ++i) {
+                        value_t probe_val = probe_buffer.data[i];
+                        int32_t key = probe_val.int32_val.val;
+                        if (probe_val.int32_val.status) {
                             auto [start, end] = hash_table.lookup(key);
                             for (auto entry_ptr = start; entry_ptr < end; ++entry_ptr) {
                                 if (entry_ptr->key != key) continue;
                                 size_t build_idx = entry_ptr->row_idx;
-                                size_t probe_global_idx = base_idx + i;
+                                size_t probe_global_idx = buf_idx * MAX_PER_BUFFER_ENTRY + i;
                                 size_t left_row_idx = build_left ? build_idx : probe_global_idx;
                                 size_t right_row_idx = build_left ? probe_global_idx : build_idx;
                                 
@@ -106,7 +149,7 @@ struct JoinAlgorithm {
                                     size_t target_row_idx = mapping.use_left ? left_row_idx : right_row_idx;
                                     const auto& side = (*mapping.target_side)[mapping.col_idx];
                                     value_t val = side.get_value(target_row_idx);
-                                    
+
                                     auto& res_col = local_results[out_idx];
                                     if (res_col.buffers.empty() || (res_col.buffers.back().count == MAX_PER_BUFFER_ENTRY)) {
                                         res_col.buffers.emplace_back();
@@ -118,67 +161,14 @@ struct JoinAlgorithm {
                             }
                         }
                     }
-                });
-            }
-            
-            for (auto& thread : threads) {
-                thread.join();
-            }
-        } else {
-            size_t num_buffers = probe_column.buffers.size();
-            
-            std::atomic<size_t> work_counter{0};
-            
-            std::vector<std::thread> threads;
-            for (size_t t = 0; t < num_threads; ++t) {
-                threads.emplace_back([&, t]() {
-                    ExecuteResult& local_results = thread_results[t];
-                    
-                    size_t buf_idx;
-                    while ((buf_idx = work_counter.fetch_add(1, std::memory_order_relaxed)) < num_buffers) {
-                        const auto& probe_buffer = probe_column.buffers[buf_idx];
-                        for (size_t i = 0; i < probe_buffer.count; ++i) {
-                            value_t probe_val = probe_buffer.data[i];
-                            int32_t key = probe_val.int32_val.val;
-                            if (probe_val.int32_val.status) {
-                                auto [start, end] = hash_table.lookup(key);
-                                for (auto entry_ptr = start; entry_ptr < end; ++entry_ptr) {
-                                    if (entry_ptr->key != key) continue;
-                                    size_t build_idx = entry_ptr->row_idx;
-                                    size_t probe_global_idx = buf_idx * MAX_PER_BUFFER_ENTRY + i;
-                                    size_t left_row_idx = build_left ? build_idx : probe_global_idx;
-                                    size_t right_row_idx = build_left ? probe_global_idx : build_idx;
-                                    
-                                    for (size_t out_idx = 0; out_idx < mappings.size(); ++out_idx) {
-                                        const auto& mapping = mappings[out_idx];
-                                        size_t target_row_idx = mapping.use_left ? left_row_idx : right_row_idx;
-                                        const auto& side = (*mapping.target_side)[mapping.col_idx];
-                                        value_t val = side.get_value(target_row_idx);
-
-                                        auto& res_col = local_results[out_idx];
-                                        if (res_col.buffers.empty() || (res_col.buffers.back().count == MAX_PER_BUFFER_ENTRY)) {
-                                            res_col.buffers.emplace_back();
-                                        }
-                                        auto& last_buf = res_col.buffers.back();
-                                        last_buf.data[last_buf.count++] = std::move(val);
-                                        ++res_col.num_rows;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                });
-            }
-            
-            for (auto& thread : threads) {
-                thread.join();
-            }
+                }
+            });
         }
         
         ExecuteResult final_results;
         final_results.resize(output_attrs.size());
         
-        for (size_t out_idx = 0; out_idx < output_attrs.size(); ++out_idx) {
+         for (size_t out_idx = 0; out_idx < output_attrs.size(); ++out_idx) {
             size_t total_rows = 0;
             for (size_t t = 0; t < num_threads; ++t) {
                 total_rows += thread_results[t][out_idx].num_rows;
@@ -222,15 +212,17 @@ struct JoinAlgorithm {
 
 ExecuteResult execute_hash_join(const Plan&          plan,
     const JoinNode&                                  join,
-    const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
+    const std::vector<std::tuple<size_t, DataType>>& output_attrs,
+    ThreadPool& thread_pool,
+    GlobalAllocator& global_alloc) {
     auto                           left_idx    = join.left;
     auto                           right_idx   = join.right;
     auto&                          left_node   = plan.nodes[left_idx];
     auto&                          right_node  = plan.nodes[right_idx];
     auto&                          left_attr_vec  = left_node.output_attrs;
     auto&                          right_attr_vec = right_node.output_attrs;
-    auto                           left        = execute_impl(plan, left_idx);
-    auto                           right       = execute_impl(plan, right_idx);
+    auto                           left        = execute_impl(plan, left_idx, thread_pool, global_alloc);
+    auto                           right       = execute_impl(plan, right_idx, thread_pool, global_alloc);
     std::vector<column_t> results;
     results.reserve(std::min(left.size() + right.size(), static_cast<size_t>(left.size() * 2)));
 
@@ -240,7 +232,9 @@ ExecuteResult execute_hash_join(const Plan&          plan,
         .results                             = results,
         .left_col                            = join.left_attr,
         .right_col                           = join.right_attr,
-        .output_attrs                        = output_attrs};
+        .output_attrs                        = output_attrs,
+        .thread_pool                         = thread_pool,
+        .global_alloc                        = global_alloc};
     join_algorithm.run<int32_t>();
     return std::move(results);
 }
@@ -254,9 +248,8 @@ ExecuteResult execute_scan(const Plan&               plan,
     auto                           table_id = scan.base_table_id;
     auto&                          input    = plan.inputs[table_id];
     ExecuteResult                results(output_attrs.size());
-    for (size_t idx = 0; idx < output_attrs.size(); ++idx) {
-        auto& attr = output_attrs[idx];
-        auto col_idx = std::get<0>(attr);
+    for (size_t idx=0; idx < output_attrs.size(); ++idx) {
+        auto col_idx = std::get<0>(output_attrs[idx]);
         auto& column = input.columns[col_idx];
         DataType data_type = column.type;
         results[idx] = column_t(data_type);
@@ -265,13 +258,13 @@ ExecuteResult execute_scan(const Plan&               plan,
     return std::move(results);
 }
 
-ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
+ExecuteResult execute_impl(const Plan& plan, size_t node_idx, ThreadPool& thread_pool, GlobalAllocator& global_alloc) {
     auto& node = plan.nodes[node_idx];
     auto ret = (std::visit(
         [&](const auto& value) {
             using T = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<T, JoinNode>) {
-                return std::move(execute_hash_join(plan, value, node.output_attrs));
+                return std::move(execute_hash_join(plan, value, node.output_attrs, thread_pool, global_alloc));
             } else {
                 return std::move(execute_scan(plan, value, node.output_attrs));
             }
@@ -283,13 +276,28 @@ ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
 
 ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     namespace views = ranges::views;
-    auto ret        = execute_impl(plan, plan.root);
+    
+    // Initialize global threadpool if not already created
+    if (!g_thread_pool) {
+        size_t num_threads = SPC__THREAD_COUNT;
+        if (num_threads == 0) num_threads = 4;
+        g_thread_pool = new ThreadPool(num_threads);
+    }
+    
+    // Initialize global allocator if not already created
+    if (!g_global_alloc) {
+        g_global_alloc = new GlobalAllocator();
+    }
+    
+    ThreadPool& thread_pool = *g_thread_pool;
+    GlobalAllocator& global_alloc = *g_global_alloc;
+    auto ret        = execute_impl(plan, plan.root, thread_pool, global_alloc);
     std::vector<DataType> ret_attr_vec;
     ret_attr_vec.reserve(plan.nodes[plan.root].output_attrs.size());
     for (const auto& attr : plan.nodes[plan.root].output_attrs) {
         ret_attr_vec.push_back(std::move(std::get<1>(attr)));
     }
-    ColumnarTable table = materialize_columnar_table(plan, ret, ret_attr_vec);
+    ColumnarTable table = materialize_columnar_table_parallel(plan, ret, ret_attr_vec, thread_pool);
     return table;
 }
 
@@ -297,7 +305,8 @@ void* build_context() {
     return nullptr;
 }
 
-void destroy_context([[maybe_unused]] void* context) {}
+void destroy_context([[maybe_unused]] void* context) {
+}
 
 
 
@@ -327,7 +336,6 @@ inline void build_column_inserter(const size_t table_id, const size_t col_id, co
                 new_column.original_col = &column;
                 new_column.rows_per_page = first_page_rows;
                 new_column.num_rows = 0;
-                // Pre-calculate page_rowids for efficient probing
                 new_column.page_rowids.reserve(pages.size() + 1);
                 new_column.page_rowids.push_back(0);
                 for (auto& page : pages) {
@@ -369,7 +377,7 @@ inline void build_column_inserter(const size_t table_id, const size_t col_id, co
         case DataType::VARCHAR: {
             
             for (size_t idx = 0; idx < pages.size(); ++idx) {
-                const auto& page = pages[idx];
+                auto& page = pages[idx];
                 const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
                 uint16_t nr = read_u16(page_data);
 
@@ -427,17 +435,19 @@ inline void build_column_inserter(const size_t table_id, const size_t col_id, co
 }
 
 
-// function to materialize the final ExecuteResult into the corresponding ColumnarTable
-ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& result, const std::vector<DataType>& attr_vec) {
+// function to materialize the final ExecuteResult into the corresponding ColumnarTable (parallel version)
+ColumnarTable materialize_columnar_table_parallel(const Plan& plan, const ExecuteResult& result, const std::vector<DataType>& attr_vec, ThreadPool& thread_pool) {
     ColumnarTable table;
     table.num_rows = result.empty() ? 0 : result[0].num_rows;
+    size_t num_threads = thread_pool.get_num_threads();
+    
     for (size_t col_idx = 0; col_idx < attr_vec.size(); ++col_idx) {
         Column column(attr_vec[col_idx]);
-        // we use the ColumnInserters of plan.h to build the ColumnarTable columns 
-        ColumnInserter<std::string> inserter_str{column};
-        ColumnInserter<int32_t> inserter_int32{column};
         const column_t& col = result[col_idx];
+        
         if (col.num_rows == 0) {
+            ColumnInserter<std::string> inserter_str{column};
+            ColumnInserter<int32_t> inserter_int32{column};
             for (size_t row_idx = 0; row_idx < table.num_rows; ++row_idx) {
                 if (attr_vec[col_idx] == DataType::INT32) {
                     inserter_int32.insert_null();
@@ -445,67 +455,88 @@ ColumnarTable materialize_columnar_table(const Plan& plan, const ExecuteResult& 
                     inserter_str.insert_null();
                 }
             }
+            inserter_int32.finalize();
+            inserter_str.finalize();
         } else {
-            for (size_t row_idx = 0; row_idx < table.num_rows; ++row_idx) {
-                value_t val = col.get_value(row_idx);
-                if (val.str_val.offset == 0xFFFF || !val.int32_val.status) {
-                    if (attr_vec[col_idx] == DataType::INT32) {
-                        inserter_int32.insert_null();
-                    } else if (attr_vec[col_idx] == DataType::VARCHAR) {
-                        inserter_str.insert_null();
-                    }
-                } else {
-                    if (attr_vec[col_idx] == DataType::VARCHAR) {
-                        auto& table = plan.inputs[val.str_val.table_id];
-                        auto& column = table.columns[val.str_val.col_id];
-                        Page* page = column.pages[val.str_val.page_id];
-                        const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
-                        size_t offset = val.str_val.offset;
-                        std::string str;
-                        std::string_view sview{nullptr, 0};
-                        uint16_t nr = read_u16(page_data);
-                        uint16_t page_id = val.str_val.page_id;
-                        // if the string is long, we build the string page by page
-                        if (nr == 0xffff) {
-                            uint16_t nchars = read_u16(page_data + 2);
-                            str.assign(reinterpret_cast<const char*>(page_data + 4), nchars);
-                            ++page_id;
-                            page = column.pages[page_id];
-                            page_data = reinterpret_cast<const uint8_t*>(page->data);
-                            nr = read_u16(page_data);
-                            while (nr == 0xfffe) [[likely]] {
-                                nchars = read_u16(page_data + 2);
-                                str.append(reinterpret_cast<const char*>(page_data + 4), nchars);
+            std::vector<std::vector<Page*>> thread_pages(num_threads);
+            
+            thread_pool.run_parallel([&](size_t thread_id) {
+                Column local_column(attr_vec[col_idx]);
+                ColumnInserter<std::string> inserter_str{local_column};
+                ColumnInserter<int32_t> inserter_int32{local_column};
+                
+                size_t rows_per_thread = (table.num_rows + num_threads - 1) / num_threads;
+                size_t start_row = thread_id * rows_per_thread;
+                size_t end_row = std::min(start_row + rows_per_thread, table.num_rows);
+                
+                for (size_t row_idx = start_row; row_idx < end_row; ++row_idx) {
+                    value_t val = col.get_value(row_idx);
+                    if (val.str_val.offset == 0xFFFF || !val.int32_val.status) {
+                        if (attr_vec[col_idx] == DataType::INT32) {
+                            inserter_int32.insert_null();
+                        } else if (attr_vec[col_idx] == DataType::VARCHAR) {
+                            inserter_str.insert_null();
+                        }
+                    } else {
+                        if (attr_vec[col_idx] == DataType::VARCHAR) {
+                            auto& table = plan.inputs[val.str_val.table_id];
+                            auto& column = table.columns[val.str_val.col_id];
+                            Page* page = column.pages[val.str_val.page_id];
+                            const uint8_t* page_data = reinterpret_cast<const uint8_t*>(page->data);
+                            size_t offset = val.str_val.offset;
+                            std::string str;
+                            std::string_view sview{nullptr, 0};
+                            uint16_t nr = read_u16(page_data);
+                            uint16_t page_id = val.str_val.page_id;
+                            // if the string is long, we build the string page by page
+                            if (nr == 0xffff) {
+                                uint16_t nchars = read_u16(page_data + 2);
+                                str.assign(reinterpret_cast<const char*>(page_data + 4), nchars);
                                 ++page_id;
                                 page = column.pages[page_id];
                                 page_data = reinterpret_cast<const uint8_t*>(page->data);
                                 nr = read_u16(page_data);
+                                while (nr == 0xfffe) [[likely]] {
+                                    nchars = read_u16(page_data + 2);
+                                    str.append(reinterpret_cast<const char*>(page_data + 4), nchars);
+                                    ++page_id;
+                                    page = column.pages[page_id];
+                                    page_data = reinterpret_cast<const uint8_t*>(page->data);
+                                    nr = read_u16(page_data);
+                                }
+                                inserter_str.insert(str);
+                                continue;
                             }
-                            inserter_str.insert(str);
-                            continue;
-                        }
-                        // if the string is short, we use string_view to avoid copying it like above
-                        uint16_t end_offset_pos = offset;
-                        uint16_t end_offset;
-                        uint16_t start_offset;
-                        uint16_t base_offset = 4 + nr * 2;
-                        if (end_offset_pos > 4) {
-                            end_offset = read_u16(page_data + end_offset_pos) + base_offset;
-                            start_offset = read_u16(page_data + end_offset_pos - 2) + base_offset;
+                            // if the string is short, we use string_view to avoid copying it like above
+                            uint16_t end_offset_pos = offset;
+                            uint16_t end_offset;
+                            uint16_t start_offset;
+                            uint16_t base_offset = 4 + nr * 2;
+                            if (end_offset_pos > 4) {
+                                end_offset = read_u16(page_data + end_offset_pos) + base_offset;
+                                start_offset = read_u16(page_data + end_offset_pos - 2) + base_offset;
+                            } else {
+                                start_offset = base_offset;
+                                end_offset = read_u16(page_data + 4) + base_offset;
+                            }
+                            sview = std::string_view(reinterpret_cast<const char*>(page_data + start_offset), end_offset - start_offset);
+                            inserter_str.insert(sview);
                         } else {
-                            start_offset = base_offset;
-                            end_offset = read_u16(page_data + 4) + base_offset;
+                            inserter_int32.insert(val.int32_val.val);
                         }
-                        sview = std::string_view(reinterpret_cast<const char*>(page_data + start_offset), end_offset - start_offset);
-                        inserter_str.insert(sview);
-                    } else {
-                        inserter_int32.insert(val.int32_val.val);
                     }
+                }
+                inserter_int32.finalize();
+                inserter_str.finalize();
+                thread_pages[thread_id] = std::move(local_column.pages);
+            });
+            
+            for (size_t t = 0; t < num_threads; ++t) {
+                for (auto& page : thread_pages[t]) {
+                    column.pages.push_back(page);
                 }
             }
         }
-        inserter_int32.finalize();
-        inserter_str.finalize();
         table.columns.push_back(std::move(column));
     }
     return table;

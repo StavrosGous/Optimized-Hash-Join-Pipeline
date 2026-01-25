@@ -9,7 +9,8 @@
 #include <iostream>
 #include "utils.h"
 
-const uint16_t tags[2048] = {   // Precalculated 4 bit Bloom filter tags + padding
+// Precalculated 4 bit Bloom filter tags + padding
+const uint16_t tags[2048] = {   
     0x000F, 0x0017, 0x0027, 0x0047, 0x0087, 0x0107, 0x0207, 0x0407, 
     0x0807, 0x1007, 0x2007, 0x4007, 0x8007, 0x001B, 0x002B, 0x004B,
     0x008B, 0x010B, 0x020B, 0x040B, 0x080B, 0x100B, 0x200B, 0x400B,
@@ -275,8 +276,9 @@ public:
         uint32_t row_idx;
     };
 
-    void build_parallel(const column_t& col, size_t num_threads = SPC__CORE_COUNT) {
+    void build_parallel(const column_t& col, ThreadPool& thread_pool, GlobalAllocator& global_alloc) {
         size_t total_tuples = col.num_rows;
+        size_t num_threads = thread_pool.get_num_threads();
 
         constexpr size_t ENTRY_SIZE = sizeof(Entry);
         constexpr size_t SMALL_DATA = SMALL_SIZE;
@@ -290,46 +292,36 @@ public:
         size_t overhead_chunks = num_threads * ((NUM_PARTITIONS * SMALL_DATA + LARGE_DATA - 1) / LARGE_DATA + 1);
         size_t num_large_chunks = base_chunks + overhead_chunks;
 
-        GlobalAllocator global_alloc;
-
+        // Reset and reserve the global allocator for reuse
+        global_alloc.reset();
         global_alloc.reserve(num_large_chunks);
 
         std::vector<ThreadLocalState *> thread_states(num_threads);
 
-        for (int t = 0; t < num_threads; ++t) {
+        for (size_t t = 0; t < num_threads; ++t) {
             thread_states[t] = new ThreadLocalState(global_alloc);
         }
 
         // split to partitions & count tuples
         size_t tuples_per_thread = (total_tuples + num_threads - 1) / num_threads;
         
-        std::vector<std::thread> threads;
-
-        for (size_t t = 0; t < num_threads; ++t) {
+        thread_pool.run_parallel([&](size_t t) {
             size_t start_idx = t * tuples_per_thread;
             size_t end_idx = std::min(start_idx + tuples_per_thread, total_tuples);
+            
+            for (size_t row_idx = start_idx; row_idx < end_idx; ++row_idx) {
+                value_t val = col.get_value(row_idx);
+                if (!val.int32_val.status) continue;
 
-            threads.emplace_back([&col, &thread_states, t, start_idx, end_idx]() {
-                for (size_t row_idx = start_idx; row_idx < end_idx; ++row_idx) {
-                    value_t val = col.get_value(row_idx);
-                    if (!val.int32_val.status) continue;
+                int32_t key = val.int32_val.val;
+                uint64_t hash = crc_hash(key);
 
-                    int32_t key = val.int32_val.val;
-                    uint64_t hash = crc_hash(key);
-
-                    ThreadLocalState* tls = thread_states[t];
-                    Entry* entry = tls->consume<Entry>(hash);
-                    entry->key = key;
-                    entry->row_idx = static_cast<uint32_t>(row_idx);
-                }
-            });
-        }
-
-        for (auto& thread : threads) {
-            thread.join();
-        }
-
-        threads.clear();
+                ThreadLocalState* tls = thread_states[t];
+                Entry* entry = tls->consume<Entry>(hash);
+                entry->key = key;
+                entry->row_idx = static_cast<uint32_t>(row_idx);
+            }
+        });
 
         size_t count_total[NUM_PARTITIONS] = {0};
         for (size_t p = 0; p < NUM_PARTITIONS; ++p) {
@@ -344,25 +336,12 @@ public:
             partition_offsets[p + 1] = partition_offsets[p] + count_total[p];
         }
 
-        // postProcessBuild with direct chunk traversal
-        size_t partitions_per_thread = (NUM_PARTITIONS + num_threads - 1) / num_threads;
-        
-        for (size_t t = 0; t < num_threads; ++t) {
-            size_t start_partition = t * partitions_per_thread;
-            size_t end_partition = std::min(start_partition + partitions_per_thread, (size_t)NUM_PARTITIONS);
-            
-            threads.emplace_back([this, &thread_states, &partition_offsets, start_partition, end_partition, num_threads]() {
-                for (size_t p = start_partition; p < end_partition; ++p) {
-                    postProcessBuild(p, partition_offsets[p], thread_states, num_threads);
-                }
-            });
-        }
+        thread_pool.run_parallel([&](size_t t) {
+            for (size_t p = t; p < NUM_PARTITIONS; p += num_threads) {
+                postProcessBuild(p, partition_offsets[p], thread_states, num_threads);
+            }
+        });
 
-        for (auto& thread : threads) {
-            thread.join();
-        }
-
-        // Clean up thread states after postProcessBuild completes
         for (size_t t = 0; t < num_threads; ++t) {
             delete thread_states[t];
         }
@@ -411,7 +390,7 @@ private:
 
     static constexpr size_t ENTRIES_PER_CHUNK = (SMALL_SIZE - sizeof(SmallChunk*)) / sizeof(Entry);
 
-    // Helper to iterate over entries in a partition from a single thread's slab
+    // partition entries iterator
     template<typename Func>
     void forEachEntryInPartition(ThreadLocalState* tls, size_t partition, Func&& func) {
         size_t total = tls->counts[partition];
