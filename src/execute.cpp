@@ -162,7 +162,7 @@ struct JoinAlgorithm {
         ExecuteResult final_results;
         final_results.resize(output_attrs.size());
         
-        for (size_t out_idx = 0; out_idx < output_attrs.size(); ++out_idx) {
+         for (size_t out_idx = 0; out_idx < output_attrs.size(); ++out_idx) {
             size_t total_rows = 0;
             for (size_t t = 0; t < num_threads; ++t) {
                 total_rows += thread_results[t][out_idx].num_rows;
@@ -171,6 +171,12 @@ struct JoinAlgorithm {
             if (total_rows == 0) {
                 continue;
             }
+            
+            // Pre-allocate all buffers needed
+            size_t num_full_buffers = total_rows / MAX_PER_BUFFER_ENTRY;
+            size_t remainder = total_rows % MAX_PER_BUFFER_ENTRY;
+            size_t total_buffers = num_full_buffers + (remainder > 0 ? 1 : 0);
+            final_results[out_idx].buffers.reserve(total_buffers);
             
             buffer_t current_buf;
             
