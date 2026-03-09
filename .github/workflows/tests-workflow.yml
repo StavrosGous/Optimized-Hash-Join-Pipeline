@@ -1,31 +1,21 @@
-# This starter workflow is for a CMake project running on a single platform. There is a different starter workflow if you need cross-platform coverage.
-# See: https://github.com/actions/starter-workflows/blob/main/ci/cmake-multi-platform.yml
-name: Tests Workflow
+name: Tests
 
 on:
   push:
-    branches: [ "unchained-hashtable" ]
+    branches: [ main ]
   pull_request:
-    branches: [ "main" ]
-
-env:
-  # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
-  BUILD_TYPE: Release
+    branches: [ main ]
 
 jobs:
-  build-and-test:
-    runs-on:
-      group: k23a
-
+  test:
+    runs-on: ubuntu-latest
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Build Tests
-      working-directory: ${{github.workspace}}
-      run: ./build.sh tests
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Test
-      working-directory: ${{github.workspace}}
-      run: ./run.sh tests
+      - name: Build Tests
+        run: ./build.sh tests
+
+      - name: Run Tests
+        run: ./run.sh tests
 

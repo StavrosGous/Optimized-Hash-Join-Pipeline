@@ -1,10 +1,8 @@
-# Team Members:
-- Ioannis Vogiatzis (11152200021)
-- Stavros Gkousgkounis (11152200033)
+# Technical Report
 
-# Responsibilities
-
-It is difficult to split responsibilities because we both have been involved with all parts of the code to some extent.
+## Authors
+- Ioannis Vogiatzis
+- Stavros Gkousgkounis
 
 # Fast Plans Runtime Benchmarks
 

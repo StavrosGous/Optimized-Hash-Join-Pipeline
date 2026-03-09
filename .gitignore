@@ -1,17 +1,26 @@
-/.vscode
-/build
-/imdb
-/output*.txt
-/*.tgz
-/*.db
-/TPC-H*
-/job-sample
-/.cache
-/cache
-shmeiwseis.txt
+# Build
+/build/
 *.o
-main
-*.txt
-*tar.gz
-*.log
 *.out
+
+# IDE
+/.vscode/
+/.cache/
+/.idea/
+*.swp
+*~
+
+# Data
+/imdb/
+/cache/
+*.tgz
+*.tar.gz
+*.db
+
+# Output
+/output*.txt
+*.log
+
+# Misc
+/TPC-H*
+/job-sample/

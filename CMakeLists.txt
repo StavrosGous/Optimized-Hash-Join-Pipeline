@@ -130,7 +130,3 @@ target_link_libraries(unit_tests PRIVATE re2 range-v3 fmt Catch2::Catch2WithMain
 target_include_directories(run PRIVATE include)
 target_include_directories(build_database PRIVATE include)
 target_include_directories(unit_tests PRIVATE include)
-
-
-
-

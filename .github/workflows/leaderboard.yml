@@ -1,28 +1,21 @@
-name: Workflow for leaderboard submission
+name: Build
 
 on:
   push:
-    branches: [ main, parallel-probe, work-stealing, threadpool]
+    branches: [ main ]
   pull_request:
     branches: [ main ]
 
 jobs:
-  leaderboard:
-    name: leaderboard
-    runs-on:
-      group: benchmark
+  build:
+    name: build
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Configure CMake
-        run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev
 
       - name: Build project
-        run: |
-          cmake --build build -- -j$(nproc) leaderboard
-          
-      - name: Run for leaderboard
-        run: |
-          leaderboard.sh
+        run: cmake --build build -- -j$(nproc) fast
