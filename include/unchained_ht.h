@@ -281,9 +281,9 @@ public:
         size_t num_threads = thread_pool.get_num_threads();
 
         constexpr size_t ENTRY_SIZE = sizeof(Entry);
-        constexpr size_t SMALL_DATA = SMALL_SIZE;
-        constexpr size_t LARGE_DATA = LARGE_SIZE;
-        constexpr size_t SMALLS_PER_LARGE = LARGE_DATA / SMALL_SIZE;
+        constexpr size_t SMALL_DATA = SMALL_CHUNK_SIZE;
+        constexpr size_t LARGE_DATA = LARGE_CHUNK_SIZE;
+        constexpr size_t SMALLS_PER_LARGE = LARGE_DATA / SMALL_CHUNK_SIZE;
         constexpr size_t TUPLES_PER_SMALL = SMALL_DATA / ENTRY_SIZE;
         constexpr size_t TUPLES_PER_LARGE = TUPLES_PER_SMALL * SMALLS_PER_LARGE;
 
@@ -347,6 +347,13 @@ public:
         }
     };
 
+    // Single-threaded build for testing
+    void build(const column_t& col) {
+        ThreadPool tp(1);
+        GlobalAllocator alloc;
+        build_parallel(col, tp, alloc);
+    }
+
     UnchainedHashTable(size_t sz) {
         size_t shift_val = 9; // minimum size 512 entries
         while ((1 << shift_val) <= sz) shift_val++;
@@ -388,7 +395,7 @@ private:
         return !(tag & ~entry); // andn
     }
 
-    static constexpr size_t ENTRIES_PER_CHUNK = (SMALL_SIZE - sizeof(SmallChunk*)) / sizeof(Entry);
+    static constexpr size_t ENTRIES_PER_CHUNK = (SMALL_CHUNK_SIZE - sizeof(SmallChunk*)) / sizeof(Entry);
 
     // partition entries iterator
     template<typename Func>
